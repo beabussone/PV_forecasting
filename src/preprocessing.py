@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from datetime import timezone, timedelta
+from pathlib import Path
 
 
 # --- 1. Funzioni semplici: missing + OHE+other --- #
@@ -22,6 +23,19 @@ def fill_missing_values(X: pd.DataFrame) -> pd.DataFrame:
         X["rain_1h"] = X["rain_1h"].fillna(0)
     return X
 
+# --- helper per ottenere i metadati del sito (lat/lon) --- #
+
+def extract_site_coords(X_raw: pd.DataFrame) -> tuple[float, float]:
+    """
+    Estrae (lat, lon) da X_raw assumendo che siano costanti
+    su tutto il dataset.
+    """
+    if "lat" not in X_raw.columns or "lon" not in X_raw.columns:
+        raise ValueError("Impossibile estrarre lat/lon: colonne mancanti in X_raw.")
+
+    lat = float(X_raw["lat"].iloc[0])
+    lon = float(X_raw["lon"].iloc[0])
+    return lat, lon
 
 def ohe_weather_description(
     X: pd.DataFrame,
@@ -43,6 +57,8 @@ def ohe_weather_description(
             dtype=int,
         )
 
+    # --- helper per ottenere i metadati del sito (lat/lon) --- #
+    
     # Drop lat/lon se presenti
     X = X.drop(columns=[c for c in ["lat", "lon"] if c in X.columns], errors="ignore")
 
@@ -150,14 +166,17 @@ def preprocess_pipeline(
     y_raw: pd.DataFrame,
     fixed_offset_hours: int = 10,
     debug: bool = True,
+    save_processed: bool = False,
+    output_dir: str = "data/processed",
 ):
     """
     Pipeline di preprocessing completa:
     1) fill missing (es. rain_1h)
     2) OHE weather_description con colonna 'other'
     3) timezone fix + cyclical encoding su X
-    4) allineamento X–y
+    4) allineamento X-y
     5) cast numeriche a float32
+    6) (opzionale) salvataggio su disco dei dataset processati
     """
     if debug:
         print("\n=== PREPROCESSING PIPELINE ===")
@@ -190,5 +209,16 @@ def preprocess_pipeline(
         print(X_aligned.dtypes)
         print("[DTYPES] y:")
         print(y_aligned.dtypes)
+
+    if save_processed:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        X_path = out_dir / "X_processed.csv"
+        y_path = out_dir / "y_processed.csv"
+        X_aligned.to_csv(X_path, index=True)
+        y_aligned.to_csv(y_path, index=True)
+        if debug:
+            print(f"[SAVE] X -> {X_path}")
+            print(f"[SAVE] y -> {y_path}")
 
     return X_aligned, y_aligned
