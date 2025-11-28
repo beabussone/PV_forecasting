@@ -38,3 +38,29 @@ In questa sezione trasformiamo la colonna dt_iso per renderla digeribile dal mod
 **Encoding Ciclico** (Seno/Coseno): Le variabili cicliche come l'ora (0-23) e il mese (1-12) sono state trasformate in coordinate su un cerchio usando funzioni trigonometriche ($sin$ e $cos$). Questo permette alla rete neurale di comprendere correttamente la continuità temporale (es. capire che le ore 23:00 e 00:00 sono adiacenti) che andrebbe persa con una semplice rappresentazione numerica lineare.
 
 
+## Feature engineering
+Per migliorare le prestazioni e integrare conoscenza fisica senza introdurre artefatti (come quelli derivati dall’uso di POA senza tilt reale), sono state aggiunte due famiglie di feature:
+
+### Solar features
+| Feature           | Descrizione |
+| ----------------- | ----------- |
+| `solar_zenith`    | Angolo zenitale (90° = sole allo zenit), influenza la radiazione incidente. |
+| `solar_azimuth`   | Direzione del sole (0° Nord, 180° Sud), distingue mattino/pomeriggio. |
+| `clearness_index` | Rapporto tra GHI reale ed ETR (extraterrestrial irradiance), misura la limpidezza del cielo. |
+
+### Effective irradiance
+| Feature                | Formula                   | Significato |
+| ---------------------- | ------------------------- | ----------- |
+| `effective_irradiance` | `DNI * cos(zenith) + DHI` | Stima dell’energia effettivamente utile al pannello. |
+| `direct_fraction`      | `DNI / (DNI + DHI)`       | Indica se prevale radiazione diretta o diffusa. |
+| `clear_sky_index`      | `GHI / GHI_clear`         | Quanto la condizione reale differisce dal cielo ideale. |
+
+Queste feature incorporano informazione fisica verificabile e sono estremamente predittive per modelli PV.
+
+### Osservazioni
+- Queste feature derivano da combinazioni non lineari → aggiungono informazione reale, non ridondanza.
+- Sono altamente correlate con la produzione PV in modo fisicamente coerente.
+
+## Output del preprocessing
+- Dataset con feature: `data/processed/X_feat.csv`
+- Target: `data/processed/y_processed.csv`

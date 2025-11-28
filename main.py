@@ -3,7 +3,7 @@
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
 from src.preprocessing import preprocess_pipeline
-from src.feature_engineering import add_solar_features
+from src.feature_engineering import add_solar_features, add_effective_features
 from src.preprocessing import extract_site_coords
 from src.feature_engineering import save_feature_engineered_X
 
@@ -31,6 +31,7 @@ def main():
     
     # 4) Feature engineering avanzato su X già pulito
     X_feat = add_solar_features(X_proc, lat, lon)
+    X_feat = add_effective_features(X_feat)
     print(f"[FINAL] X_feat: {X_feat.shape}")
     print(f"[FINAL] X_feat columns: {X_feat.columns}")
 
