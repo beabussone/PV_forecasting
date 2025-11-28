@@ -228,3 +228,131 @@ def save_feature_engineered_X(X_feat: pd.DataFrame, out_path: str = "data/proces
 
     X_feat.to_csv(out, index=True)
     print(f"[SAVE] X_feat -> {out}")
+
+
+
+
+def compute_sun_times(df, lat):
+    """
+    Calcola sunrise e sunset per ogni timestamp basandosi su solar_zenith.
+    Quando solar_zenith = 90°, il sole è sull'orizzonte.
+    Qui effettuiamo una stima robusta:
+    - sunrise = primo istante con zenith < 90°
+    - sunset  = ultimo istante con zenith < 90°
+    Restituisce:
+        sunrise_times: array di minuti dal giorno (float)
+        sunset_times : array di minuti dal giorno (float)
+    """
+    zen = df["solar_zenith"].to_numpy()
+
+    # Booleano giorno/notte
+    is_day = zen < 90
+
+    # estrazione timestamp in minuti dal giorno
+    dt = df.index
+    minutes_of_day = dt.hour * 60 + dt.minute
+
+    sunrise_times = np.zeros(len(df), dtype="float32")
+    sunset_times  = np.zeros(len(df), dtype="float32")
+
+    current_day = None
+    day_indices = []
+
+    # Raggruppiamo per giorno
+    for i, ts in enumerate(dt):
+        day = ts.date()
+        if current_day is None:
+            current_day = day
+
+        if day != current_day:
+            # processa giorno precedente
+            day_arr = np.array(day_indices)
+            if len(day_arr) > 0:
+                day_is_day = is_day[day_arr]
+                day_min = minutes_of_day[day_arr]
+
+                if np.any(day_is_day):
+                    sunrise = day_min[day_is_day][0]
+                    sunset  = day_min[day_is_day][-1]
+                else:
+                    sunrise = 0
+                    sunset  = 0
+
+                sunrise_times[day_arr] = sunrise
+                sunset_times[day_arr]  = sunset
+
+            # reset per nuovo giorno
+            current_day = day
+            day_indices = [i]
+        else:
+            day_indices.append(i)
+
+    # ultimo giorno
+    if len(day_indices) > 0:
+        day_arr = np.array(day_indices)
+        day_is_day = is_day[day_arr]
+        day_min = minutes_of_day[day_arr]
+        if np.any(day_is_day):
+            sunrise = day_min[day_is_day][0]
+            sunset  = day_min[day_is_day][-1]
+        else:
+            sunrise = 0
+            sunset  = 0
+        sunrise_times[day_arr] = sunrise
+        sunset_times[day_arr]  = sunset
+
+    return sunrise_times, sunset_times
+
+
+def add_solar_time_features(df: pd.DataFrame, lat: float) -> pd.DataFrame:
+    """
+    Aggiunge:
+    - minutes_since_sunrise
+    - minutes_until_sunset
+    
+    Richiede:
+    - solar_zenith già presente
+    - DatetimeIndex su df
+    """
+    df = df.copy()
+
+    if "solar_zenith" not in df.columns:
+        raise KeyError("Per usare add_solar_time_features serve 'solar_zenith'")
+
+    # Calcolo sunrise e sunset per ogni giorno
+    sunrise_times, sunset_times = compute_sun_times(df, lat)
+
+    # minuti correnti della giornata
+    dt = df.index
+    minutes = dt.hour * 60 + dt.minute
+
+    # calcoli finali
+    df["minutes_since_sunrise"] = (minutes - sunrise_times).astype("float32")
+    df["minutes_until_sunset"]  = (sunset_times - minutes).astype("float32")
+
+    # clamp: valori negativi → notte
+    df["minutes_since_sunrise"] = df["minutes_since_sunrise"].clip(lower=0)
+    df["minutes_until_sunset"]  = df["minutes_until_sunset"].clip(lower=0)
+
+    return df
+
+
+def add_cloud_effect(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggiunge cloud_effect = GHI * (1 - clouds_all/100)
+    Richiede Ghi e clouds_all in df.
+    """
+    df = df.copy()
+
+    if "Ghi" not in df.columns or "clouds_all" not in df.columns:
+        raise KeyError("Per usare add_cloud_effect servono 'Ghi' e 'clouds_all'")
+
+    ghi = df["Ghi"].to_numpy(dtype="float32")
+    cloud = df["clouds_all"].to_numpy(dtype="float32")
+
+    cloud_eff = ghi * (1 - cloud / 100.0)
+    cloud_eff = np.clip(cloud_eff, 0, None)
+
+    df["cloud_effect"] = cloud_eff.astype("float32")
+    
+    return df
