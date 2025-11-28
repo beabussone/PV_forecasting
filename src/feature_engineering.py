@@ -148,6 +148,74 @@ def add_solar_features(
 
     return df
 
+# ============================================================
+# 3. Alternative-to-POA physically-based features
+# ============================================================
+
+def add_effective_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggiunge 3 feature fisiche che NON richiedono tilt:
+    - effective_irradiance   = DNI*cos(zenith) + DHI
+    - direct_fraction         = DNI / (DNI + DHI)
+    - clear_sky_index         = GHI / GHI_clear   (stima semplice)
+    
+    Assunzioni:
+    - solar_zenith già presente nel df (in gradi)
+    - colonne DHI, DNI, GHI presenti
+    """
+
+    df = df.copy()
+
+    # --- Check colonne ---
+    for col in ["Dhi", "Dni", "Ghi", "solar_zenith"]:
+        if col not in df.columns:
+            raise KeyError(f"Column '{col}' missing for effective features")
+
+    # estrazione dati base
+    dni = df["Dni"].to_numpy(dtype="float32")
+    dhi = df["Dhi"].to_numpy(dtype="float32")
+    ghi = df["Ghi"].to_numpy(dtype="float32")
+    zenith_deg = df["solar_zenith"].to_numpy(dtype="float32")
+
+    # conversione in radianti
+    zenith_rad = np.radians(zenith_deg)
+
+    # =====================================================
+    # 1) effective irradiance (senza tilt)
+    # =====================================================
+    # proiezione della componente diretta + componente diffusa
+    eff = dni * np.cos(zenith_rad) + dhi
+    eff = np.clip(eff, 0, None)  # niente valori negativi
+
+    df["effective_irradiance"] = eff.astype("float32")
+
+    # =====================================================
+    # 2) direct fraction
+    # =====================================================
+    with np.errstate(divide="ignore", invalid="ignore"):
+        direct_frac = dni / (dni + dhi)
+    direct_frac = np.nan_to_num(direct_frac, nan=0.0, posinf=1.0, neginf=0.0)
+
+    df["direct_fraction"] = direct_frac.astype("float32")
+
+    # =====================================================
+    # 3) clear-sky index (semplificato)
+    # =====================================================
+    # modello semplice per GHI_clear:
+    # GHI_clear = ghi_potenziale = k * cos(zenith)
+    # dove k = irradiance extraterrestre media ≈ 1367*(1+0.033 cos(...)) ~ 1000 W/m² scalati
+    # per robustezza:
+    
+    ghi_clear = 1000 * np.cos(zenith_rad)
+    ghi_clear = np.clip(ghi_clear, 1e-6, None)  # evitare divisioni zero
+
+    csi = ghi / ghi_clear
+    csi = np.clip(csi, 0, 2.0)
+
+    df["clear_sky_index"] = csi.astype("float32")
+
+    return df
+
 
 
 def save_feature_engineered_X(X_feat: pd.DataFrame, out_path: str = "data/processed/X_feat.csv"):
