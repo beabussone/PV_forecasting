@@ -57,9 +57,23 @@ Per migliorare le prestazioni e integrare conoscenza fisica senza introdurre art
 
 Queste feature incorporano informazione fisica verificabile e sono estremamente predittive per modelli PV.
 
+### 🌤 Atmospheric & temporal features
+
+| Feature                  | Formula / Definizione | Significato |
+| ------------------------ | --------------------- | ------------ |
+| `cloud_effect`           | `GHI * (1 - clouds_all/100)` | Stima della radiazione attesa dopo aver tenuto conto della copertura nuvolosa (proxy robusta dello shading atmosferico). |
+| `minutes_since_sunrise`  | differenza tra ora attuale e “alba stimata” | Indica quanto è avanzata la giornata solare (feature altamente informativa per la forma della curva PV). |
+| `minutes_until_sunset`   | differenza tra “tramonto stimato” e ora attuale | Indica quanta parte della giornata solare rimane (utile per modellare la discesa della potenza). |
+
+---
+
 ### Osservazioni
-- Queste feature derivano da combinazioni non lineari → aggiungono informazione reale, non ridondanza.
-- Sono altamente correlate con la produzione PV in modo fisicamente coerente.
+
+- Queste feature derivano da **combinazioni non lineari** di variabili fisiche → aggiungono informazione reale, non ridondanza.  
+- `effective_irradiance`, `direct_fraction` e `clear_sky_index` rappresentano lo stato radiativo dell’atmosfera senza bisogno del tilt del pannello.  
+- `cloud_effect` cattura il contributo della copertura nuvolosa sulla radiazione.  
+- `minutes_since_sunrise` e `minutes_until_sunset` sono tra le feature temporali più predittive per la produzione PV, in quanto modellano la **fase della giornata solare**.  
+- Complessivamente, queste feature rafforzano in modo sostanziale la capacità del modello di apprendere la dinamica giornaliera e stagionale della produzione fotovoltaica.
 
 ## Output del preprocessing
 - Dataset con feature: `data/processed/X_feat.csv`
