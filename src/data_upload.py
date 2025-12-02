@@ -36,7 +36,7 @@ def load_pv(pv_path: str, sheets=PV_SHEETS) -> pd.DataFrame:
     dfs = _read_excel_sheets(path, sheets)
     y = pd.concat(dfs, axis=0, ignore_index=True)
 
-    # Il tuo file aveva intestazioni un po' strane → sistemiamo noi:
+    # Il file aveva intestazioni un po' strane → sistemiamo noi:
     y.columns = ["datetime", "kwp"]
     return y
 

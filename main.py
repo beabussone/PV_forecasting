@@ -19,10 +19,10 @@ from src.feature_engineering import (
 )
 from src.data_module import (
     PVDataConfig,
-    PVForecastDataset,
-    build_dataloader,
-    temporal_train_val_test_split,
+    prepare_data_splits,
+    build_dataloaders_from_splits,
 )
+
 
 def main():
     print("=== PV Forecasting Pipeline ===")
@@ -42,22 +42,42 @@ def main():
     run_basic_eda(X_raw, y_raw)
     analyze_feature_label_correlations(X_raw, y_raw, label_col="kwp")
 
-    # 3) Preprocessing deterministico: missing, timezone+cyc, allineamento, float32
-    X_base, y_base = preprocess_pipeline(X_raw, y_raw, fixed_offset_hours=10, save_processed=True)
+    # 3) Preprocessing deterministico: missing, timezone+cyc, allineamento, float32.
+    #    Qui non si fa alcun fit, così i passi successivi lavorano su dati puliti ma non “sbilanciati”.
+    X_base, y_base = preprocess_pipeline(
+        X_raw,
+        y_raw,
+        fixed_offset_hours=10,
+        save_processed=True,
+    )
     print(f"[BASE] X_base: {X_base.shape}, y_base: {y_base.shape}")
 
-    # 4) Split temporale
-    X_train, X_val, X_test, y_train, y_val, y_test = temporal_train_val_test_split(
-        X_base, y_base, train_ratio=0.7, val_ratio=0.15
+    # 4) Split temporale (prima di OHE/feature engineering) per evitare leakage tra split.
+    #    'mode' decide se usare holdout (train_val_test) o CV con test fisso.
+    mode = "train_val_test"  # "train_val_test" oppure "cv"
+    train_ratio = 0.7
+    val_ratio = 0.15
+    n_splits = 5
+
+    raw_splits = prepare_data_splits(
+        X_base,
+        y_base,
+        mode=mode,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        n_splits=n_splits,
     )
-    print(f"[SPLIT] train: {X_train.shape}, val: {X_val.shape}, test: {X_test.shape}")
 
-    # 5) OHE fittato solo sul train e applicato a val/test
-    X_train_enc, vocab = fit_ohe_on_train(X_train)
-    X_val_enc = transform_ohe_with_vocab(X_val, vocab)
-    X_test_enc = transform_ohe_with_vocab(X_test, vocab)
+    data_config = PVDataConfig(
+        history_hours=72,
+        horizon_hours=24,
+        include_future_covariates=False,
+    )
+    batch_size = 64
+    num_workers = 0
+    scaling_mode = "standard"
 
-    # 6) Feature engineering avanzato su ciascuno split
+    # Blocco FE riutilizzabile per evitare duplicazione tra train/val/test o tra fold
     def fe_block(df):
         out = add_solar_features(df, lat, lon)
         out = add_effective_features(out)
@@ -65,43 +85,153 @@ def main():
         out = add_solar_time_features(out, lat)
         return out
 
-    X_train_feat = fe_block(X_train_enc)
-    X_val_feat = fe_block(X_val_enc)
-    X_test_feat = fe_block(X_test_enc)
+    # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
+    folds_raw = []
+    if mode == "train_val_test":
+        X_train, X_val, X_test, y_train, y_val, y_test = raw_splits
+        folds_raw.append(
+            {
+                "fold": 0,
+                "X_train": X_train,
+                "X_val": X_val,
+                "X_test": X_test,
+                "y_train": y_train,
+                "y_val": y_val,
+                "y_test": y_test,
+            }
+        )
+    elif mode == "cv":
+        for idx, split in enumerate(raw_splits):
+            X_train, X_val, X_test, y_train, y_val, y_test = split
+            folds_raw.append(
+                {
+                    "fold": idx,
+                    "X_train": X_train,
+                    "X_val": X_val,
+                    "X_test": X_test,
+                    "y_train": y_train,
+                    "y_val": y_val,
+                    "y_test": y_test,
+                }
+            )
+    else:
+        raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
 
-    # 7) Scaling opzionale (standard/minmax/None) solo sui float
-    scaling_mode = "standard"
-    scaler = fit_scaler_on_train(X_train_feat, mode=scaling_mode)
-    X_train_scaled = apply_scaler(X_train_feat, scaler)
-    X_val_scaled = apply_scaler(X_val_feat, scaler)
-    X_test_scaled = apply_scaler(X_test_feat, scaler)
+    # Applica OHE/FE/scaling per ogni fold in modo indipendente (fit solo sul train del fold)
+    folds_processed = []
+    for fr in folds_raw:
+        # 5) OHE fittato solo sul train e applicato a val/test
+        X_train_enc, vocab = fit_ohe_on_train(fr["X_train"])
+        X_val_enc = transform_ohe_with_vocab(fr["X_val"], vocab)
+        X_test_enc = transform_ohe_with_vocab(fr["X_test"], vocab) if fr["X_test"] is not None else None
 
-    # 8) Salvataggi facoltativi
-    save_feature_engineered_X(X_train_scaled, out_path="data/processed/X_train_feat.csv")
-    save_feature_engineered_X(X_val_scaled, out_path="data/processed/X_val_feat.csv")
-    save_feature_engineered_X(X_test_scaled, out_path="data/processed/X_test_feat.csv")
+        # 6) Feature engineering avanzato
+        X_train_feat = fe_block(X_train_enc)
+        X_val_feat = fe_block(X_val_enc)
+        X_test_feat = fe_block(X_test_enc) if X_test_enc is not None else None
 
-    # 9) Dataset/DataLoader PyTorch
-    data_config = PVDataConfig(
-        history_hours=72,
-        horizon_hours=24,
-        include_future_covariates=False,
-    )
+        print(
+            f"[COLUMNS][fold {fr['fold']}] FE columns ({len(X_train_feat.columns)}): "
+            f"{list(X_train_feat.columns)}"
+        )
 
-    train_ds = PVForecastDataset(X_train_scaled, y_train, data_config)
-    val_ds = PVForecastDataset(X_val_scaled, y_val, data_config)
-    test_ds = PVForecastDataset(X_test_scaled, y_test, data_config)
+        # 7) Scaling opzionale (fit su train)
+        scaler = fit_scaler_on_train(X_train_feat, mode=scaling_mode)
+        X_train_scaled = apply_scaler(X_train_feat, scaler)
+        X_val_scaled = apply_scaler(X_val_feat, scaler)
+        X_test_scaled = apply_scaler(X_test_feat, scaler) if X_test_feat is not None else None
 
-    train_loader = build_dataloader(train_ds, batch_size=64, shuffle=True, num_workers=0)
-    val_loader = build_dataloader(val_ds, batch_size=64, shuffle=False, num_workers=0)
-    test_loader = build_dataloader(test_ds, batch_size=64, shuffle=False, num_workers=0)
+        folds_processed.append(
+            {
+                "fold": fr["fold"],
+                "X_train": X_train_scaled,
+                "X_val": X_val_scaled,
+                "X_test": X_test_scaled,
+                "y_train": fr["y_train"],
+                "y_val": fr["y_val"],
+                "y_test": fr["y_test"],
+            }
+        )
 
-    print(
-        f"[DATA] train windows: {len(train_ds)} | val: {len(val_ds)} | test: {len(test_ds)} "
-        f"| hist={data_config.history_hours}h, horizon={data_config.horizon_hours}h"
-    )
-    print(f"[DATA] train batches: {len(train_loader)}, val batches: {len(val_loader)}, test batches: {len(test_loader)}")
+    if mode == "train_val_test":
+        p = folds_processed[0]
 
+        # 8) Salvataggi facoltativi dei dataset con feature ingegnerizzate
+        save_feature_engineered_X(p["X_train"], out_path="data/processed/X_train_feat.csv")
+        save_feature_engineered_X(p["X_val"], out_path="data/processed/X_val_feat.csv")
+        save_feature_engineered_X(p["X_test"], out_path="data/processed/X_test_feat.csv")
+
+        scaled_splits = (
+            p["X_train"],
+            p["X_val"],
+            p["X_test"],
+            p["y_train"],
+            p["y_val"],
+            p["y_test"],
+        )
+        train_loader, val_loader, test_loader = build_dataloaders_from_splits(
+            scaled_splits,
+            mode="train_val_test",
+            config=data_config,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
+        print(
+            f"[SPLIT] train: {p['X_train'].shape}, "
+            f"val: {p['X_val'].shape}, "
+            f"test: {p['X_test'].shape}"
+        )
+
+        print(
+            f"[DATA] train windows: {len(train_loader.dataset)} | "
+            f"val: {len(val_loader.dataset)} | "
+            f"test: {len(test_loader.dataset)} | "
+            f"hist={data_config.history_hours}h, "
+            f"horizon={data_config.horizon_hours}h"
+        )
+
+        print(
+            f"[LOADER] train batches: {len(train_loader)}, "
+            f"val batches: {len(val_loader)}, "
+            f"test batches: {len(test_loader)}"
+        )
+    else:
+        # 8) DataLoader per CV (include test comune)
+        folds_scaled = [
+            (
+                p["X_train"],
+                p["X_val"],
+                p["X_test"],
+                p["y_train"],
+                p["y_val"],
+                p["y_test"],
+            )
+            for p in folds_processed
+        ]
+
+        cv_loaders = build_dataloaders_from_splits(
+            folds_scaled,
+            mode="cv",
+            config=data_config,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
+        for f, p in zip(cv_loaders, folds_processed):
+            print(
+                f"[CV][fold {f['fold']}] "
+                f"train: {p['X_train'].shape}, val: {p['X_val'].shape}, test: {p['X_test'].shape}"
+            )
+            print(
+                f"[LOADER][fold {f['fold']}] "
+                f"train windows: {len(f['train_loader'].dataset)} | "
+                f"val windows: {len(f['val_loader'].dataset)} | "
+                f"test windows: {len(f['test_loader'].dataset)} | "
+                f"train batches: {len(f['train_loader'])} | "
+                f"val batches: {len(f['val_loader'])} | "
+                f"test batches: {len(f['test_loader'])}"
+            )
     print("=== Pipeline completata. Dataset e DataLoader pronti per il training PyTorch. ===")
 
 
