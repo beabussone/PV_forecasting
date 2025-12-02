@@ -28,6 +28,26 @@ In questa fase eseguiremo un'analisi esplorativa del dataset con l’obiettivo d
 - Categorie meteo: poche classi dominanti (`sky is clear`, `light rain`, `overcast clouds`) e molte classi rare; da qui la scelta di raggruppare e fare One-Hot Encoding con colonna `other`.
 - Analisi temporale: il picco di `kwp` è concentrato nelle ore centrali del giorno, coerente con l’allineamento a fuso fisso e con i picchi di irraggiamento nei plot `eda_plots/time_series_kwp.png`.
 
+### Visualizzazioni chiave
+- ![Serie storica della potenza](eda_plots/time_series_kwp.png)  
+  Oscillazione stagionale e picchi giornalieri stabili confermano che il riallineamento temporale (rimozione DST) mantiene il mezzogiorno fisico costante.
+- ![Correlazioni numeriche](eda_plots/correlation_numeric.png)  
+  `Ghi`, `Dni` e `Dhi` sono le variabili più correlate con `kwp`; pressione e umidità hanno contributo secondario, a supporto della selezione di feature radiative.
+- ![Distribuzione Ghi](eda_plots/hist_Ghi.png)  
+  Distribuzione ampia con coda destra: giustifica il clipping di outlier e la standardizzazione prima del modello.
+- ![Distribuzione Dni](eda_plots/hist_Dni.png)  
+  Elevata variabilità della componente diretta; suggerisce l’utilità di combinare Dni con lo zenith per ridurre la varianza (vedi `effective_irradiance`).
+- ![Distribuzione Dhi](eda_plots/hist_Dhi.png)  
+  Valori più bassi e compatti: buona per stimare la quota diffusa e per calcolare `direct_fraction`.
+- ![Temperatura](eda_plots/hist_temp.png) e ![Umidità](eda_plots/hist_humidity.png)  
+  Distribuzioni quasi gaussiane con varianza moderata: scaling standard funziona bene e riduce l’impatto di unità diverse.
+- ![Copertura nuvolosa](eda_plots/hist_clouds_all.png)  
+  Distribuzione quasi uniforme: rende utile una feature continua (`cloud_effect`) invece di sole categorie meteo.
+- ![Pioggia 1h](eda_plots/hist_rain_1h.png)  
+  Dominata dagli zeri (79% missing imputati a 0) con coda corta: motivazione per imputazione conservativa senza creare rumore.
+- ![Classi meteo - bar](eda_plots/bar_weather_description.png) e ![Classi meteo - pie](eda_plots/pie_weather_description.png)  
+  Confermano poche classi prevalenti e molte rare: scelta di raggruppare e usare OHE con bucket “other” per evitare sparsità.
+
 
 # Ciclical Encoding
 
@@ -74,6 +94,13 @@ Queste feature incorporano informazione fisica verificabile e sono estremamente 
 - `cloud_effect` cattura il contributo della copertura nuvolosa sulla radiazione.  
 - `minutes_since_sunrise` e `minutes_until_sunset` sono tra le feature temporali più predittive per la produzione PV, in quanto modellano la **fase della giornata solare**.  
 - Complessivamente, queste feature rafforzano in modo sostanziale la capacità del modello di apprendere la dinamica giornaliera e stagionale della produzione fotovoltaica.
+
+### Perché queste feature funzionano
+- Allineamento temporale ciclico (sin/cos) + rimozione DST: riduce varianza stagionale e impedisce al modello di vedere discontinuità artificiali attorno ai cambi ora legale.
+- `solar_zenith`/`solar_azimuth`/`clearness_index`: trasformano il timestamp in geometria solare misurabile, rendendo la previsione meno dipendente da pattern stagionali impliciti.
+- `effective_irradiance` e `direct_fraction`: combinano Dni e Dhi in modo fisico, riducono il rumore sulle singole componenti e spiegano meglio i picchi di produzione osservati nei giorni sereni.
+- `cloud_effect`: ingloba la copertura nuvolosa come attenuazione continua su GHI, più stabile delle sole etichette meteo discrete.
+- `minutes_since_sunrise` e `minutes_until_sunset`: ancorano ogni istante alla fase del giorno solare, migliorando la predizione della curva PV anche al variare della durata del giorno.
 
 ## Output del preprocessing
 - Dataset con feature: `data/processed/X_feat.csv`

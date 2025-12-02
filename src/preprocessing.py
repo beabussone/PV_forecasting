@@ -1,12 +1,10 @@
-# src/preprocess.py
-
 import numpy as np
 import pandas as pd
 from datetime import timezone, timedelta
 from pathlib import Path
+from typing import Dict, List, Tuple
 
-
-# --- 1. Funzioni semplici: missing + OHE+other --- #
+# --- 1. Funzioni semplici: missing --- #
 
 DEFAULT_RARE_WEATHER = [
     "haze", "light intensity shower rain", "heavy intensity rain",
@@ -17,11 +15,12 @@ DEFAULT_RARE_WEATHER = [
 
 
 def fill_missing_values(X: pd.DataFrame) -> pd.DataFrame:
-    """Esempio: rain_1h → 0."""
+    """Imputazioni deterministiche (es. rain_1h → 0)."""
     X = X.copy()
     if "rain_1h" in X.columns:
         X["rain_1h"] = X["rain_1h"].fillna(0)
     return X
+
 
 # --- helper per ottenere i metadati del sito (lat/lon) --- #
 
@@ -37,18 +36,52 @@ def extract_site_coords(X_raw: pd.DataFrame) -> tuple[float, float]:
     lon = float(X_raw["lon"].iloc[0])
     return lat, lon
 
-def ohe_weather_description(
-    X: pd.DataFrame,
-    rare_list=DEFAULT_RARE_WEATHER
-) -> pd.DataFrame:
-    """
-    Aggrega alcune classi rare di weather_description in 'other'
-    e applica One-Hot Encoding.
-    """
-    X = X.copy()
 
+def drop_site_coords(X: pd.DataFrame) -> pd.DataFrame:
+    """Rimuove lat/lon (costanti) dopo averli estratti."""
+    return X.drop(columns=[c for c in ["lat", "lon"] if c in X.columns], errors="ignore")
+
+
+# --- 2. Funzioni OHE train/transform --- #
+
+def _replace_rare_weather(X: pd.DataFrame, rare_list: List[str]) -> pd.DataFrame:
+    X = X.copy()
     if "weather_description" in X.columns:
         X["weather_description"] = X["weather_description"].replace(rare_list, "other")
+    return X
+
+
+def fit_ohe_on_train(
+    X_train: pd.DataFrame,
+    rare_list: List[str] = DEFAULT_RARE_WEATHER,
+) -> tuple[pd.DataFrame, List[str]]:
+    """
+    Fit OHE solo su train e restituisce le colonne finali (vocabolario fissato).
+    """
+    X_train = _replace_rare_weather(X_train, rare_list)
+    if "weather_description" in X_train.columns:
+        X_train = pd.get_dummies(
+            X_train,
+            columns=["weather_description"],
+            prefix="weather",
+            dummy_na=False,
+            dtype=int,
+        )
+    X_train = drop_site_coords(X_train)
+    dummy_columns = list(X_train.columns)
+    return X_train, dummy_columns
+
+
+def transform_ohe_with_vocab(
+    X: pd.DataFrame,
+    dummy_columns: List[str],
+    rare_list: List[str] = DEFAULT_RARE_WEATHER,
+) -> pd.DataFrame:
+    """
+    Applica OHE usando il vocabolario del train (colonne forzate e ordinate).
+    """
+    X = _replace_rare_weather(X, rare_list)
+    if "weather_description" in X.columns:
         X = pd.get_dummies(
             X,
             columns=["weather_description"],
@@ -56,16 +89,68 @@ def ohe_weather_description(
             dummy_na=False,
             dtype=int,
         )
-
-    # --- helper per ottenere i metadati del sito (lat/lon) --- #
-    
-    # Drop lat/lon se presenti
-    X = X.drop(columns=[c for c in ["lat", "lon"] if c in X.columns], errors="ignore")
-
+    X = drop_site_coords(X)
+    X = X.reindex(columns=dummy_columns, fill_value=0)
     return X
 
 
-# --- 2. Funzione principale: timezone + cyclical encoding + align --- #
+# --- 3. Funzioni di scaling --- #
+
+def fit_scaler_on_train(
+    X_train: pd.DataFrame,
+    mode: str | None = None,
+) -> Dict:
+    """
+    Calcola statistiche di scaling sul train.
+    mode: None | "standard" | "minmax"
+    """
+    if mode is None:
+        return {}
+    if mode not in {"standard", "minmax"}:
+        raise ValueError("mode deve essere None, 'standard' o 'minmax'.")
+
+    scaler = {"mode": mode, "stats": {}}
+    float_cols = X_train.select_dtypes(include=["float", "float32", "float64"]).columns
+    for col in float_cols:
+        col_values = X_train[col].to_numpy(dtype=np.float32)
+        if mode == "standard":
+            mean = float(np.mean(col_values))
+            std = float(np.std(col_values) + 1e-8)
+            scaler["stats"][col] = {"mean": mean, "std": std}
+        else:  # minmax
+            cmin = float(np.min(col_values))
+            cmax = float(np.max(col_values))
+            scaler["stats"][col] = {"min": cmin, "max": cmax}
+    return scaler
+
+
+def apply_scaler(
+    X: pd.DataFrame,
+    scaler: Dict,
+) -> pd.DataFrame:
+    """
+    Applica scaling secondo le statistiche fornite.
+    """
+    if not scaler:
+        return X
+
+    mode = scaler["mode"]
+    stats = scaler["stats"]
+    X_scaled = X.copy()
+    for col, params in stats.items():
+        if col not in X_scaled.columns:
+            continue
+        arr = X_scaled[col].to_numpy(dtype=np.float32)
+        if mode == "standard":
+            arr = (arr - params["mean"]) / params["std"]
+        else:
+            denom = (params["max"] - params["min"]) if (params["max"] - params["min"]) != 0 else 1e-8
+            arr = (arr - params["min"]) / denom
+        X_scaled[col] = arr.astype(np.float32)
+    return X_scaled
+
+
+# --- 4. Funzione principale: timezone + cyclical encoding + align --- #
 
 def process_all_data(
     X: pd.DataFrame,
@@ -159,7 +244,7 @@ def process_all_data(
     return X_aligned, y_aligned
 
 
-# --- 3. Pipeline completa richiamata dal main --- #
+# --- 5. Pipeline base (deterministica) richiamata dal main --- #
 
 def preprocess_pipeline(
     X_raw: pd.DataFrame,
@@ -170,25 +255,23 @@ def preprocess_pipeline(
     output_dir: str = "data/processed",
 ):
     """
-    Pipeline di preprocessing completa:
+    Pipeline deterministica (niente fit su val/test):
     1) fill missing (es. rain_1h)
-    2) OHE weather_description con colonna 'other'
-    3) timezone fix + cyclical encoding su X
-    4) allineamento X-y
-    5) cast numeriche a float32
-    6) (opzionale) salvataggio su disco dei dataset processati
+    2) timezone fix + cyclical encoding su X
+    3) allineamento X-y
+    4) cast numeriche a float32
+    5) (opzionale) salvataggio su disco dei dataset processati
+
+    L'OHE e lo scaling vanno fittati a parte sul train.
     """
     if debug:
-        print("\n=== PREPROCESSING PIPELINE ===")
+        print("\n=== PREPROCESSING PIPELINE (deterministica) ===")
         print(f"[RAW] X: {X_raw.shape}, y: {y_raw.shape}")
 
     # 1) missing
     X = fill_missing_values(X_raw)
 
-    # 2) OHE + other
-    X = ohe_weather_description(X)
-
-    # 3) timezone + cyc + align
+    # 2) timezone + cyc + align
     X_aligned, y_aligned = process_all_data(
         X, y_raw,
         x_time_col="dt_iso",
@@ -197,7 +280,7 @@ def preprocess_pipeline(
         debug=debug
     )
 
-    # 4) cast a float32 delle colonne numeriche
+    # 3) cast a float32 delle colonne numeriche
     num_cols_X = X_aligned.select_dtypes(include=["number"]).columns
     num_cols_y = y_aligned.select_dtypes(include=["number"]).columns
 
