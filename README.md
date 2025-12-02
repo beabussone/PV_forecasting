@@ -105,3 +105,206 @@ Queste feature incorporano informazione fisica verificabile e sono estremamente 
 ## Output del preprocessing
 - Dataset con feature: `data/processed/X_feat.csv`
 - Target: `data/processed/y_processed.csv`
+
+
+### Sistema di Split: Train/Val/Test e Cross-Validation
+Il file data_module.py introduce un sistema avanzato per gestire gli split temporali, ora selezionabili tramite configurazione.
+
+## Modalità 1 — Train/Val/Test classico
+
+# Produce i dataset:
+
+- X_train, X_val, X_test
+
+- y_train, y_val, y_test
+
+# Configurazione:
+
+cfg.split.mode = "train_val_test"
+
+## Modalità 2 — Cross-Validation temporale
+
+# Produce una lista di fold del tipo:
+
+{
+  "fold": k,
+  "X_train": ...,
+  "X_val": ...,
+  "X_test": ...
+}
+
+
+# Configurazione:
+
+cfg.split.mode = "cv"
+
+
+La funzione centrale è:
+
+prepare_data_splits(X, y, mode="train_val_test" | "cv")
+
+
+Lo split viene eseguito prima di OHE, feature engineering e scaling, evitando ogni forma di data leakage.
+
+### Creazione dei DataLoader
+
+Una volta generati gli split raw, la pipeline costruisce i DataLoader tramite:
+
+build_dataloaders_from_splits(...)
+
+In modalità Train/Val/Test:
+
+Restituisce:
+
+train_loader, val_loader, test_loader
+
+In modalità Cross-Validation:
+
+Restituisce una lista di:
+
+{
+  "fold": k,
+  "train_loader": ...,
+  "val_loader": ...,
+  "test_loader": ...
+}
+
+
+Ogni fold è processato in isolamento, includendo:
+
+fit del One-Hot Encoding solo sul train,
+
+feature engineering separata,
+
+scaling fittato solo sul train.
+
+### Configurazioni centralizzate (config.py)
+
+ExperimentConfig è il nuovo centro di controllo della pipeline.
+
+Include:
+
+PathsConfig
+
+Percorsi:
+
+dataset
+
+output feature-engineered
+
+SplitConfig
+
+mode = "train_val_test" | "cv"
+
+train_ratio, val_ratio
+
+n_splits
+
+PVDataConfig
+
+history_hours
+
+horizon_hours
+
+include_future_covariates
+
+DataloaderConfig
+
+batch_size
+
+num_workers
+
+scaling_mode
+
+ModelConfig
+
+model_name = "lstm" | "gru"
+
+hidden_size, num_layers, dropout
+
+input_size e horizon aggiornati dinamicamente nel main
+
+TrainingConfig
+
+epochs
+
+lr
+
+weight_decay
+
+patience
+
+min_delta
+
+### Modelli LSTM e GRU (models.py)
+
+Sono supportati due modelli many-to-one:
+
+✔ LSTMModel
+✔ GRUModel
+
+Entrambi:
+
+prendono input [batch, time, features]
+
+producono output [batch, horizon]
+
+Il modello si costruisce con:
+
+model = build_model(cfg.model, device)
+
+
+Grazie al registry interno:
+
+{"lstm": LSTMModel, "gru": GRUModel}
+
+### Training modulare con Early Stopping (training.py)
+
+Il modulo contiene:
+
+train_one_epoch()
+
+evaluate()
+
+fit() con:
+
+early stopping
+
+best state restoration
+
+storico train_loss e val_loss
+
+Il training è ora completamente separato dalla pipeline di preprocessing.
+
+### Ristrutturazione del main.py
+
+Il file main.py ora:
+
+Carica l’intera pipeline tramite ExperimentConfig
+
+Applica preprocessing deterministico
+
+Esegue lo split raw tramite prepare_data_splits
+
+Applica:
+
+One-Hot Encoding
+
+Feature Engineering
+
+Scaling
+a ciascun fold in isolamento
+
+Costruisce i DataLoader
+
+Aggiorna dinamicamente:
+
+cfg.model.input_size = train_dataset.X_values.shape[1]
+cfg.model.horizon = train_dataset.horizon
+
+
+Addestra un modello:
+
+una sola volta (TVT)
+
+una volta per ogni fold (CV)
