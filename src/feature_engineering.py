@@ -138,7 +138,15 @@ def add_solar_features(
     with np.errstate(divide="ignore", invalid="ignore"):
         ki = ghi / np.where(etr <= 0, np.nan, etr)
 
-    # bounding per togliere outlier assurdi
+    # 1) rimpiazziamo NaN / ±Inf con valori “safe”
+    ki = np.nan_to_num(
+        ki,
+        nan=0.0,    # notte o GHI mancante → 0
+        posinf=1.5, # outlier estremi verso l’alto li schiacciamo comunque
+        neginf=0.0,
+    )
+
+    # 2) bounding per togliere outlier assurdi
     ki = np.clip(ki, 0, 1.5)
 
     # ---- 6) Scriviamo SOLO le 3 feature finali nel df ----

@@ -1,5 +1,6 @@
 # main.py
 
+import torch
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
 from src.preprocessing import (
@@ -23,14 +24,23 @@ from src.data_module import (
     build_dataloaders_from_splits,
 )
 
+from src.config import ExperimentConfig
+from src.models import build_model
+from src.training import fit
+
 
 def main():
     print("=== PV Forecasting Pipeline ===")
 
+    # -----------------------------
+    # Config globale dell’esperimento
+    # -----------------------------
+    cfg = ExperimentConfig()
+
     # 1) Caricamento dataset
     X_raw, y_raw = load_datasets(
-        wx_path="data/wx_dataset.xlsx",
-        pv_path="data/pv_dataset.xlsx"
+        wx_path=cfg.paths.wx_path,
+        pv_path=cfg.paths.pv_path,
     )
     print(f"[LOAD] X_raw: {X_raw.shape}, y_raw: {y_raw.shape}")
 
@@ -52,30 +62,21 @@ def main():
     )
     print(f"[BASE] X_base: {X_base.shape}, y_base: {y_base.shape}")
 
-    # 4) Split temporale (prima di OHE/feature engineering) per evitare leakage tra split.
-    #    'mode' decide se usare holdout (train_val_test) o CV con test fisso.
-    mode = "train_val_test"  # "train_val_test" oppure "cv"
-    train_ratio = 0.7
-    val_ratio = 0.15
-    n_splits = 5
-
+    # 4) Split temporale (prima di OHE/feature engineering)
+    mode = cfg.split.mode
     raw_splits = prepare_data_splits(
         X_base,
         y_base,
         mode=mode,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        n_splits=n_splits,
+        train_ratio=cfg.split.train_ratio,
+        val_ratio=cfg.split.val_ratio,
+        n_splits=cfg.split.n_splits,
     )
 
-    data_config = PVDataConfig(
-        history_hours=72,
-        horizon_hours=24,
-        include_future_covariates=False,
-    )
-    batch_size = 64
-    num_workers = 0
-    scaling_mode = "standard"
+    data_config = cfg.data
+    batch_size = cfg.dataloader.batch_size
+    num_workers = cfg.dataloader.num_workers
+    scaling_mode = cfg.dataloader.scaling_mode
 
     # Blocco FE riutilizzabile per evitare duplicazione tra train/val/test o tra fold
     def fe_block(df):
@@ -157,9 +158,9 @@ def main():
         p = folds_processed[0]
 
         # 8) Salvataggi facoltativi dei dataset con feature ingegnerizzate
-        save_feature_engineered_X(p["X_train"], out_path="data/processed/X_train_feat.csv")
-        save_feature_engineered_X(p["X_val"], out_path="data/processed/X_val_feat.csv")
-        save_feature_engineered_X(p["X_test"], out_path="data/processed/X_test_feat.csv")
+        save_feature_engineered_X(p["X_train"], out_path=cfg.paths.X_train_feat_out)
+        save_feature_engineered_X(p["X_val"], out_path=cfg.paths.X_val_feat_out)
+        save_feature_engineered_X(p["X_test"], out_path=cfg.paths.X_test_feat_out)
 
         scaled_splits = (
             p["X_train"],
@@ -177,6 +178,24 @@ def main():
             num_workers=num_workers,
         )
 
+        '''# --- DEBUG: controlliamo NaN/Inf nei dati del dataloader ---
+        import torch
+
+        first_batch = next(iter(train_loader))
+        x = first_batch["x_hist"]
+        y = first_batch["y_future"]
+
+        print("[DEBUG] x_hist shape:", x.shape)
+        print("[DEBUG] y_future shape:", y.shape)
+        print("[DEBUG] x_hist has NaN:", torch.isnan(x).any().item())
+        print("[DEBUG] y_future has NaN:", torch.isnan(y).any().item())
+        print("[DEBUG] x_hist has Inf:", torch.isinf(x).any().item())
+        print("[DEBUG] y_future has Inf:", torch.isinf(y).any().item())
+        
+        print("[DEBUG] NaN in X_train:", p["X_train"].isna().sum().sum())
+        print("[DEBUG] NaN in y_train:", p["y_train"].isna().sum().sum())
+        ### --- fine debug'''
+        
         print(
             f"[SPLIT] train: {p['X_train'].shape}, "
             f"val: {p['X_val'].shape}, "
@@ -234,6 +253,48 @@ def main():
             )
     print("=== Pipeline completata. Dataset e DataLoader pronti per il training PyTorch. ===")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+    if mode == "train_val_test":
+        # 1) recupero info dal dataset
+        train_dataset = train_loader.dataset
+        cfg.model.input_size = train_dataset.X_values.shape[1]
+        cfg.model.horizon = train_dataset.horizon
+
+        # 2) costruzione modello a partire dalla config
+        model = build_model(cfg.model, device=device)
+
+        # 3) training
+        result = fit(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=cfg.training,
+            device=device,
+        )
+
+
+    elif mode == "cv":
+        # Cross-validation: ciclo sui fold
+        for fold_data in cv_loaders:
+            print(f"=== Training fold {fold_data['fold']} ===")
+
+            train_dataset = fold_data["train_loader"].dataset
+            cfg.model.input_size = train_dataset.X_values.shape[1]
+            cfg.model.horizon = train_dataset.horizon
+
+            model = build_model(cfg.model, device=device)
+
+            result = fit(
+                model=model,
+                train_loader=fold_data["train_loader"],
+                val_loader=fold_data["val_loader"],
+                config=cfg.training,
+                device=device,
+            )
+
+            
 
 if __name__ == "__main__":
     main()
