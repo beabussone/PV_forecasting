@@ -19,8 +19,10 @@ from src.feature_engineering import (
 )
 from src.data_module import (
     PVDataConfig,
-    prepare_data_splits,
-    build_dataloaders_from_splits,
+    temporal_train_val_test_split,
+    temporal_cv_splits,
+    PVForecastDataset,
+    build_dataloader,
 )
 
 
@@ -59,15 +61,6 @@ def main():
     val_ratio = 0.15
     n_splits = 5
 
-    raw_splits = prepare_data_splits(
-        X_base,
-        y_base,
-        mode=mode,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        n_splits=n_splits,
-    )
-
     data_config = PVDataConfig(
         history_hours=72,
         horizon_hours=24,
@@ -88,6 +81,12 @@ def main():
     # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
     folds_raw = []
     if mode == "train_val_test":
+        raw_splits = temporal_train_val_test_split(
+            X_base,
+            y_base,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+        )
         X_train, X_val, X_test, y_train, y_val, y_test = raw_splits
         folds_raw.append(
             {
@@ -101,6 +100,11 @@ def main():
             }
         )
     elif mode == "cv":
+        raw_splits = temporal_cv_splits(
+            X_base,
+            y_base,
+            n_splits=n_splits,
+        )
         for idx, split in enumerate(raw_splits):
             X_train, X_val, X_test, y_train, y_val, y_test = split
             folds_raw.append(
@@ -161,21 +165,13 @@ def main():
         save_feature_engineered_X(p["X_val"], out_path="data/processed/X_val_feat.csv")
         save_feature_engineered_X(p["X_test"], out_path="data/processed/X_test_feat.csv")
 
-        scaled_splits = (
-            p["X_train"],
-            p["X_val"],
-            p["X_test"],
-            p["y_train"],
-            p["y_val"],
-            p["y_test"],
-        )
-        train_loader, val_loader, test_loader = build_dataloaders_from_splits(
-            scaled_splits,
-            mode="train_val_test",
-            config=data_config,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+        train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
+        val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+        test_ds = PVForecastDataset(p["X_test"], p["y_test"], data_config)
+
+        train_loader = build_dataloader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        test_loader = build_dataloader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
         print(
             f"[SPLIT] train: {p['X_train'].shape}, "
@@ -198,25 +194,24 @@ def main():
         )
     else:
         # 8) DataLoader per CV (include test comune)
-        folds_scaled = [
-            (
-                p["X_train"],
-                p["X_val"],
-                p["X_test"],
-                p["y_train"],
-                p["y_val"],
-                p["y_test"],
-            )
-            for p in folds_processed
-        ]
+        cv_loaders = []
+        for p in folds_processed:
+            train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
+            val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+            test_ds = PVForecastDataset(p["X_test"], p["y_test"], data_config)
 
-        cv_loaders = build_dataloaders_from_splits(
-            folds_scaled,
-            mode="cv",
-            config=data_config,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+            train_loader = build_dataloader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+            val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            test_loader = build_dataloader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+            cv_loaders.append(
+                {
+                    "fold": p["fold"],
+                    "train_loader": train_loader,
+                    "val_loader": val_loader,
+                    "test_loader": test_loader,
+                }
+            )
 
         for f, p in zip(cv_loaders, folds_processed):
             print(

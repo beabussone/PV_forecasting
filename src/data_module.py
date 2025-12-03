@@ -18,10 +18,12 @@ class PVDataConfig:
     - horizon_hours: numero di ore future da prevedere (multi-step)
     - include_future_covariates: se True, restituisce anche X_future
       (le covariate future sullo stesso orizzonte della label)
+    - stride: passo della sliding window (default 1)
     """
     history_hours: int = 72
     horizon_hours: int = 24
     include_future_covariates: bool = False
+    stride: int = 1
 
 
 class PVForecastDataset(Dataset):
@@ -49,7 +51,11 @@ class PVForecastDataset(Dataset):
 
         self.history = config.history_hours
         self.horizon = config.horizon_hours
-        self.include_future_covars = config.include_future_covariates
+        self.stride = config.stride
+        self.include_future_covariates = config.include_future_covariates
+
+        if self.stride <= 0:
+            raise ValueError("stride deve essere >= 1.")
 
         # array numpy
         self.X_values = self.X.to_numpy(dtype=np.float32)
@@ -57,19 +63,20 @@ class PVForecastDataset(Dataset):
         self.y_values = self.y.iloc[:, 0].to_numpy(dtype=np.float32).reshape(-1)
 
         # numero massimo di indici di partenza validi
-        self.max_start = len(self.X_values) - (self.history + self.horizon) + 1
-        if self.max_start <= 0:
+        max_start = len(self.X_values) - (self.history + self.horizon) + 1
+        if max_start <= 0:
             raise ValueError("Serie troppo corta rispetto a history+horizon.")
+        self.start_indices = list(range(0, max_start, self.stride))
 
     def __len__(self):
-        return self.max_start
+        return len(self.start_indices)
 
     def __getitem__(self, idx):
-        if idx < 0 or idx >= self.max_start:
+        if idx < 0 or idx >= len(self.start_indices):
             raise IndexError("Indice fuori range per il dataset.")
 
-        h_start = idx
-        h_end = idx + self.history
+        h_start = self.start_indices[idx]
+        h_end = h_start + self.history
         f_end = h_end + self.horizon
 
         x_hist = self.X_values[h_start:h_end]
@@ -80,7 +87,7 @@ class PVForecastDataset(Dataset):
             "y_future": torch.from_numpy(y_future),
         }
 
-        if self.include_future_covars:
+        if self.include_future_covariates:
             x_future = self.X_values[h_end:f_end]
             sample["x_future"] = torch.from_numpy(x_future)
 
@@ -207,6 +214,10 @@ def temporal_cv_splits(
     return splits
 
 
+# ============================================================
+# DataLoader helper
+# ============================================================
+
 def build_dataloader(
     dataset: Dataset,
     batch_size: int = 64,
@@ -229,261 +240,8 @@ def build_dataloader(
 
 
 # ============================================================
-# High-level: Train/Val/Test -> Dataset + DataLoader
+# Entry point: split + dataset + dataloader
 # ============================================================
-
-def build_pv_datasets_train_val_test(
-    X: pd.DataFrame,
-    y: pd.DataFrame,
-    config: Optional[PVDataConfig] = None,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15,
-):
-    """
-    Wrapper che:
-    1) fa lo split temporale train/val/test
-    2) costruisce 3 PVForecastDataset
-    """
-    if config is None:
-        config = PVDataConfig()
-
-    X_train, X_val, X_test, y_train, y_val, y_test = temporal_train_val_test_split(
-        X, y, train_ratio=train_ratio, val_ratio=val_ratio
-    )
-
-    train_ds = PVForecastDataset(X_train, y_train, config)
-    val_ds = PVForecastDataset(X_val, y_val, config)
-    test_ds = PVForecastDataset(X_test, y_test, config)
-
-    return train_ds, val_ds, test_ds
-
-
-def build_pv_dataloaders_train_val_test(
-    X: pd.DataFrame,
-    y: pd.DataFrame,
-    config: Optional[PVDataConfig] = None,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15,
-    batch_size: int = 64,
-    num_workers: int = 0,
-):
-    """
-    Wrapper ancora più high-level:
-    ritorna direttamente i 3 DataLoader:
-    - train_loader, val_loader, test_loader
-    """
-    train_ds, val_ds, test_ds = build_pv_datasets_train_val_test(
-        X, y, config=config, train_ratio=train_ratio, val_ratio=val_ratio
-    )
-
-    train_loader = build_dataloader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = build_dataloader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-
-    return train_loader, val_loader, test_loader
-
-
-# ============================================================
-# High-level: CV temporale -> Dataset + DataLoader per fold
-# ============================================================
-
-def build_pv_cv_datasets(
-    X: pd.DataFrame,
-    y: pd.DataFrame,
-    config: Optional[PVDataConfig] = None,
-    n_splits: int = 5,
-    test_size: Optional[int] = None,
-) -> List[Dict[str, object]]:
-    """
-    Costruisce i dataset per ogni fold della CV temporale.
-    Ritorna una lista di dict, uno per fold:
-    {
-        "fold": idx_fold,
-        "train": PVForecastDataset(...),
-        "val":   PVForecastDataset(...),
-        "test":  PVForecastDataset(...),
-    }
-    """
-    if config is None:
-        config = PVDataConfig()
-
-    splits = temporal_cv_splits(X, y, n_splits=n_splits, test_size=test_size)
-    folds: List[Dict[str, object]] = []
-
-    for fold_idx, (X_train, X_val, X_test, y_train, y_val, y_test) in enumerate(splits):
-        train_ds = PVForecastDataset(X_train, y_train, config)
-        val_ds = PVForecastDataset(X_val, y_val, config)
-        test_ds = PVForecastDataset(X_test, y_test, config)
-        folds.append(
-            {
-                "fold": fold_idx,
-                "train": train_ds,
-                "val": val_ds,
-                "test": test_ds,
-            }
-        )
-
-    return folds
-
-
-def build_pv_cv_dataloaders(
-    X: pd.DataFrame,
-    y: pd.DataFrame,
-    config: Optional[PVDataConfig] = None,
-    n_splits: int = 5,
-    test_size: Optional[int] = None,
-    batch_size: int = 64,
-    num_workers: int = 0,
-) -> List[Dict[str, object]]:
-    """
-    Come build_pv_cv_datasets ma ritorna direttamente i DataLoader per ogni fold:
-    [
-        {
-            "fold": k,
-            "train_loader": ...,
-            "val_loader":   ...
-            "test_loader":  ...
-        },
-        ...
-    ]
-    """
-    folds_ds = build_pv_cv_datasets(
-        X, y, config=config, n_splits=n_splits, test_size=test_size
-    )
-
-    folds_loaders: List[Dict[str, object]] = []
-    for f in folds_ds:
-        train_loader = build_dataloader(
-            f["train"], batch_size=batch_size, shuffle=True, num_workers=num_workers
-        )
-        val_loader = build_dataloader(
-            f["val"], batch_size=batch_size, shuffle=False, num_workers=num_workers
-        )
-        test_loader = build_dataloader(
-            f["test"], batch_size=batch_size, shuffle=False, num_workers=num_workers
-        )
-        folds_loaders.append(
-            {
-                "fold": f["fold"],
-                "train_loader": train_loader,
-                "val_loader": val_loader,
-                "test_loader": test_loader,
-            }
-        )
-
-    return folds_loaders
-
-
-# ============================================================
-# Nuova organizzazione: split e dataloader in due step
-# ============================================================
-
-def prepare_data_splits(
-    X: pd.DataFrame,
-    y: pd.DataFrame,
-    mode: str = "train_val_test",   # "cv" per cross-validation
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.15,
-    n_splits: int = 5,
-    test_size: Optional[int] = None,
-):
-    """
-    Genera solo gli split, da invocare prima di OHE / feature engineering.
-    Tenere separato lo split evita leakage quando si fittano encoder/scaler.
-
-    mode = "train_val_test"
-        ritorna (X_train, X_val, X_test, y_train, y_val, y_test)
-
-    mode = "cv"
-        ritorna una lista di tuple (X_train, X_val, X_test, y_train, y_val, y_test)
-    """
-    if mode == "train_val_test":
-        return temporal_train_val_test_split(
-            X,
-            y,
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-        )
-    elif mode == "cv":
-        return temporal_cv_splits(
-            X,
-            y,
-            n_splits=n_splits,
-            test_size=test_size,
-        )
-    else:
-        raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
-
-
-def build_dataloaders_from_splits(
-    splits,
-    mode: str = "train_val_test",
-    config: Optional[PVDataConfig] = None,
-    batch_size: int = 64,
-    num_workers: int = 0,
-):
-    """
-    Costruisce i DataLoader partendo da split gia pronti
-    (quindi dopo OHE/feature engineering/scaling).
-    """
-    if config is None:
-        config = PVDataConfig()
-
-    if mode == "train_val_test":
-        X_train, X_val, X_test, y_train, y_val, y_test = splits
-
-        train_ds = PVForecastDataset(X_train, y_train, config)
-        val_ds   = PVForecastDataset(X_val,   y_val,   config)
-        test_ds  = PVForecastDataset(X_test,  y_test,  config)
-
-        train_loader = build_dataloader(
-            train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
-        )
-        val_loader = build_dataloader(
-            val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-        )
-        test_loader = build_dataloader(
-            test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-        )
-
-        return train_loader, val_loader, test_loader
-
-    elif mode == "cv":
-        folds_loaders: List[Dict[str, object]] = []
-        for fold_idx, split in enumerate(splits):
-            X_train, X_val, X_test, y_train, y_val, y_test = split
-
-            train_ds = PVForecastDataset(X_train, y_train, config)
-            val_ds   = PVForecastDataset(X_val,   y_val,   config)
-            test_ds  = PVForecastDataset(X_test,  y_test,  config)
-
-            train_loader = build_dataloader(
-                train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
-            )
-            val_loader = build_dataloader(
-                val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-            )
-            test_loader = build_dataloader(
-                test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
-            )
-
-            folds_loaders.append(
-                {
-                    "fold": fold_idx,
-                    "train_loader": train_loader,
-                    "val_loader": val_loader,
-                    "test_loader": test_loader,
-                }
-            )
-
-        if not folds_loaders:
-            raise ValueError("Nessun fold generato: controlla gli split in input.")
-
-        return folds_loaders
-
-    else:
-        raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
-
 
 def prepare_dataloaders(
     X: pd.DataFrame,
@@ -495,29 +253,22 @@ def prepare_dataloaders(
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     n_splits: int = 5,
-    return_splits: bool = False,    # <<< NOVITÀ
+    test_size: Optional[int] = None,
+    return_splits: bool = False,
 ):
     """
-    Entry point unico.
+    Entry point unico per ottenere DataLoader (e opzionalmente gli split).
 
-    mode = "train_val_test"
-        - se return_splits=False:
-              ritorna (train_loader, val_loader, test_loader)
-        - se return_splits=True:
-              ritorna (train_loader, val_loader, test_loader,
-                       X_train, X_val, X_test,
-                       y_train, y_val, y_test)
+    mode = "train_val_test":
+        ritorna train/val/test DataLoader; se return_splits=True restituisce anche gli split.
 
-    mode = "cv"
-        - ritorna una lista di fold:
-              [ {"fold": k, "train_loader":..., "val_loader":..., "test_loader":...}, ... ]
-          (qui return_splits per ora viene ignorato)
+    mode = "cv":
+        ritorna una lista di fold con i rispettivi DataLoader.
     """
     if config is None:
         config = PVDataConfig()
 
     if mode == "train_val_test":
-        # 1) split temporale
         X_train, X_val, X_test, y_train, y_val, y_test = temporal_train_val_test_split(
             X,
             y,
@@ -525,12 +276,10 @@ def prepare_dataloaders(
             val_ratio=val_ratio,
         )
 
-        # 2) dataset
         train_ds = PVForecastDataset(X_train, y_train, config)
         val_ds   = PVForecastDataset(X_val,   y_val,   config)
         test_ds  = PVForecastDataset(X_test,  y_test,  config)
 
-        # 3) dataloader
         train_loader = build_dataloader(
             train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers
         )
@@ -553,18 +302,41 @@ def prepare_dataloaders(
                 y_val,
                 y_test,
             )
-        else:
-            return train_loader, val_loader, test_loader
+        return train_loader, val_loader, test_loader
 
-    elif mode == "cv":
-        # per la CV lasciamo la semantica invariata
-        return build_pv_cv_dataloaders(
-            X, y,
-            config=config,
+    if mode == "cv":
+        splits = temporal_cv_splits(
+            X,
+            y,
             n_splits=n_splits,
-            batch_size=batch_size,
-            num_workers=num_workers,
+            test_size=test_size,
         )
 
-    else:
-        raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
+        folds: List[Dict[str, object]] = []
+        for fold_idx, (X_train, X_val, X_test, y_train, y_val, y_test) in enumerate(splits):
+            train_ds = PVForecastDataset(X_train, y_train, config)
+            val_ds   = PVForecastDataset(X_val,   y_val,   config)
+            test_ds  = PVForecastDataset(X_test,  y_test,  config)
+
+            train_loader = build_dataloader(
+                train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+            )
+            val_loader = build_dataloader(
+                val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+            )
+            test_loader = build_dataloader(
+                test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+            )
+
+            folds.append(
+                {
+                    "fold": fold_idx,
+                    "train_loader": train_loader,
+                    "val_loader": val_loader,
+                    "test_loader": test_loader,
+                }
+            )
+
+        return folds
+
+    raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
