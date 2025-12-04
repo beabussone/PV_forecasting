@@ -96,59 +96,143 @@ def transform_ohe_with_vocab(
 
 # --- 3. Funzioni di scaling --- #
 
+import numpy as np
+import pandas as pd
+from typing import Dict, Union
+
+
+# ===============================================================
+# FIT SCALER (solo su TRAIN)
+# ===============================================================
 def fit_scaler_on_train(
     X_train: pd.DataFrame,
+    y_train: Union[pd.Series, np.ndarray, list],
     mode: str | None = None,
 ) -> Dict:
     """
-    Calcola statistiche di scaling sul train.
-    mode: None | "standard" | "minmax"
+    Calcola statistiche di scaling SOLO sul training, sia per X che per y.
+    
+    Parametri:
+        X_train: DataFrame delle feature di train
+        y_train: array/Series con i target di train (shape [N] o [N,H])
+        mode: None | "standard" | "minmax"
+
+    Ritorna:
+        dict con stats di X e y
     """
     if mode is None:
         return {}
-    if mode not in {"standard", "minmax"}:
-        raise ValueError("mode deve essere None, 'standard' o 'minmax'.")
 
-    scaler = {"mode": mode, "stats": {}}
+    if mode not in {"standard", "minmax"}:
+        raise ValueError("mode deve essere None, 'standard', 'minmax'.")
+
+    scaler = {"mode": mode, "X_stats": {}, "y_stats": {}}
+
+    # ---------- 1) Scaling delle feature X ----------
     float_cols = X_train.select_dtypes(include=["float", "float32", "float64"]).columns
+
     for col in float_cols:
         col_values = X_train[col].to_numpy(dtype=np.float32)
         if mode == "standard":
             mean = float(np.mean(col_values))
             std = float(np.std(col_values) + 1e-8)
-            scaler["stats"][col] = {"mean": mean, "std": std}
+            scaler["X_stats"][col] = {"mean": mean, "std": std}
         else:  # minmax
             cmin = float(np.min(col_values))
             cmax = float(np.max(col_values))
-            scaler["stats"][col] = {"min": cmin, "max": cmax}
+            scaler["X_stats"][col] = {"min": cmin, "max": cmax}
+
+    # ---------- 2) Scaling del target y ----------
+    y_arr = np.asarray(y_train, dtype=np.float32)
+
+    # se y è many-to-one: [N]; se many-to-many: [N, H]
+    if mode == "standard":
+        scaler["y_stats"]["mean"] = float(np.mean(y_arr))
+        scaler["y_stats"]["std"] = float(np.std(y_arr) + 1e-8)
+    else:
+        scaler["y_stats"]["min"] = float(np.min(y_arr))
+        scaler["y_stats"]["max"] = float(np.max(y_arr))
+
     return scaler
 
 
+# ===============================================================
+# APPLY SCALER (usa params del train, vale per val/test)
+# ===============================================================
 def apply_scaler(
-    X: pd.DataFrame,
+    X_or_y: Union[pd.DataFrame, pd.Series, np.ndarray],
     scaler: Dict,
-) -> pd.DataFrame:
+    is_target: bool = False,
+):
     """
-    Applica scaling secondo le statistiche fornite.
+    Applica scaling a X oppure y usando le statistiche salvate
+    (calcolate SOLO sul train).
+
+    Parametri:
+        X_or_y: DataFrame (X) o array/Series (y)
+        scaler: dizionario uscito da fit_scaler_on_train
+        is_target: se True, applica scaling della y (non guarda colonne)
+
+    Ritorna:
+        X_scaled (DataFrame) oppure y_scaled (array)
     """
     if not scaler:
-        return X
+        return X_or_y
 
     mode = scaler["mode"]
-    stats = scaler["stats"]
-    X_scaled = X.copy()
-    for col, params in stats.items():
+
+    # ================================================================
+    # 1) Scaling della y
+    # ================================================================
+    if is_target:
+        y_arr = np.asarray(X_or_y, dtype=np.float32)
+        stats = scaler["y_stats"]
+
+        if mode == "standard":
+            y_arr = (y_arr - stats["mean"]) / stats["std"]
+        else:
+            denom = (stats["max"] - stats["min"]) or 1e-8
+            y_arr = (y_arr - stats["min"]) / denom
+
+        y_arr = y_arr.astype(np.float32)
+
+        # 🔴 QUI: preserviamo il tipo originale
+        if isinstance(X_or_y, pd.DataFrame):
+            y_scaled = X_or_y.copy()
+            # funziona sia per (N,1) che per (N,H)
+            y_scaled.iloc[:, :] = y_arr
+            return y_scaled
+
+        elif isinstance(X_or_y, pd.Series):
+            y_scaled = X_or_y.copy()
+            y_scaled.iloc[:] = y_arr.reshape(-1)
+            return y_scaled
+
+        else:
+            # se era array, lasciamo array
+            return y_arr
+
+    # ================================================================
+    # 2) Scaling di X
+    # ================================================================
+    X_scaled = X_or_y.copy()
+    X_stats = scaler["X_stats"]
+
+    for col, params in X_stats.items():
         if col not in X_scaled.columns:
             continue
+
         arr = X_scaled[col].to_numpy(dtype=np.float32)
+
         if mode == "standard":
             arr = (arr - params["mean"]) / params["std"]
         else:
-            denom = (params["max"] - params["min"]) if (params["max"] - params["min"]) != 0 else 1e-8
+            denom = (params["max"] - params["min"]) or 1e-8
             arr = (arr - params["min"]) / denom
-        X_scaled[col] = arr.astype(np.float32)
-    return X_scaled
 
+        X_scaled[col] = arr.astype(np.float32)
+
+    return X_scaled
 
 # --- 4. Funzione principale: timezone + cyclical encoding + align --- #
 

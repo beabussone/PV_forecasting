@@ -60,6 +60,7 @@ class ExperimentConfig:
         default_factory=lambda: PVDataConfig(
             history_hours=72,
             horizon_hours=24,
+            stride = 1,
             include_future_covariates=False,
         )
     )

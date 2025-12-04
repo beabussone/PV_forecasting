@@ -1,5 +1,3 @@
-# main.py
-
 import torch
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
@@ -90,8 +88,8 @@ def main():
         raw_splits = temporal_train_val_test_split(
             X_base,
             y_base,
-            train_ratio=cfg.train_ratio,
-            val_ratio=cfg.val_ratio,
+            train_ratio=cfg.split.train_ratio,
+            val_ratio=cfg.split.val_ratio,
         )
         X_train, X_val, X_test, y_train, y_val, y_test = raw_splits
         folds_raw.append(
@@ -109,7 +107,7 @@ def main():
         raw_splits = temporal_cv_splits(
             X_base,
             y_base,
-            n_splits=cfg.n_splits,
+            n_splits=cfg.split.n_splits,
         )
         for idx, split in enumerate(raw_splits):
             X_train, X_val, X_test, y_train, y_val, y_test = split
@@ -145,11 +143,16 @@ def main():
             f"{list(X_train_feat.columns)}"
         )
 
-        # 7) Scaling opzionale (fit su train)
-        scaler = fit_scaler_on_train(X_train_feat, mode=scaling_mode)
+        # 7) Scaling opzionale (fit SOLO su train, sia X che y)
+        scaler = fit_scaler_on_train(X_train_feat, fr["y_train"], mode=scaling_mode)
+
         X_train_scaled = apply_scaler(X_train_feat, scaler)
-        X_val_scaled = apply_scaler(X_val_feat, scaler)
-        X_test_scaled = apply_scaler(X_test_feat, scaler) if X_test_feat is not None else None
+        X_val_scaled   = apply_scaler(X_val_feat, scaler)
+        X_test_scaled  = apply_scaler(X_test_feat, scaler) if X_test_feat is not None else None
+
+        y_train_scaled = apply_scaler(fr["y_train"], scaler, is_target=True)
+        y_val_scaled   = apply_scaler(fr["y_val"], scaler, is_target=True)
+        y_test_scaled  = apply_scaler(fr["y_test"], scaler, is_target=True) if fr["y_test"] is not None else None
 
         folds_processed.append(
             {
@@ -157,16 +160,21 @@ def main():
                 "X_train": X_train_scaled,
                 "X_val": X_val_scaled,
                 "X_test": X_test_scaled,
-                "y_train": fr["y_train"],
-                "y_val": fr["y_val"],
-                "y_test": fr["y_test"],
+                "y_train": y_train_scaled,
+                "y_val": y_val_scaled,
+                "y_test": y_test_scaled,
             }
         )
-
+        
     if mode == "train_val_test":
         p = folds_processed[0]
+        
 
         # 8) Salvataggi facoltativi dei dataset con feature ingegnerizzate
+        p["y_train"].to_csv("data/processed/y_train_scaled.csv")
+        p["y_val"].to_csv("data/processed/y_val_scaled.csv")
+        p["y_test"].to_csv("data/processed/y_test_scaled.csv")
+
         save_feature_engineered_X(p["X_train"], out_path=cfg.paths.X_train_feat_out)
         save_feature_engineered_X(p["X_val"], out_path=cfg.paths.X_val_feat_out)
         save_feature_engineered_X(p["X_test"], out_path=cfg.paths.X_test_feat_out)
@@ -203,6 +211,27 @@ def main():
         # 8) DataLoader per CV (include test comune)
         cv_loaders = []
         for p in folds_processed:
+            # salvataggio y
+            fold_id = p["fold"]
+
+            # Percorsi dei file
+            y_train_path = f"data/processed/y_train_scaled_fold{fold_id}.csv"
+            y_val_path   = f"data/processed/y_val_scaled_fold{fold_id}.csv"
+            y_test_path  = f"data/processed/y_test_scaled_fold{fold_id}.csv"
+
+            # Salvataggio
+            p["y_train"].to_csv(y_train_path)
+            p["y_val"].to_csv(y_val_path)
+            if p["y_test"] is not None:
+                p["y_test"].to_csv(y_test_path)
+
+            print(f"[SAVE][fold {fold_id}] salvati y scalati in:")
+            print("  ", y_train_path)
+            print("  ", y_val_path)
+            if p["y_test"] is not None:
+                print("  ", y_test_path)
+
+            
             train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
             val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
             test_ds = PVForecastDataset(p["X_test"], p["y_test"], data_config)
@@ -235,8 +264,6 @@ def main():
                 f"test batches: {len(f['test_loader'])}"
             )
     print("=== Pipeline completata. Dataset e DataLoader pronti per il training PyTorch. ===")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == "__main__":
     main()
