@@ -1,6 +1,8 @@
 # main.py
 
 import torch
+import numpy as np
+import os
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
 from src.preprocessing import (
@@ -19,15 +21,17 @@ from src.feature_engineering import (
     save_feature_engineered_X,
 )
 from src.data_module import (
-    PVDataConfig,
-    prepare_data_splits,
-    build_dataloaders_from_splits,
+    temporal_train_val_test_split,
+    temporal_cv_splits,
+    PVForecastDataset,
+    build_dataloader,
 )
+
 
 from src.config import ExperimentConfig
 from src.models import build_model
 from src.training import fit
-
+import pickle
 
 def main():
     print("=== PV Forecasting Pipeline ===")
@@ -64,14 +68,14 @@ def main():
 
     # 4) Split temporale (prima di OHE/feature engineering)
     mode = cfg.split.mode
-    raw_splits = prepare_data_splits(
+    '''raw_splits = prepare_data_splits(
         X_base,
         y_base,
         mode=mode,
         train_ratio=cfg.split.train_ratio,
         val_ratio=cfg.split.val_ratio,
         n_splits=cfg.split.n_splits,
-    )
+    )'''
 
     data_config = cfg.data
     batch_size = cfg.dataloader.batch_size
@@ -87,8 +91,15 @@ def main():
         return out
 
     # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
+    # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
     folds_raw = []
     if mode == "train_val_test":
+        raw_splits = temporal_train_val_test_split(
+            X_base,
+            y_base,
+            train_ratio=cfg.split.train_ratio,
+            val_ratio=cfg.split.val_ratio,
+        )
         X_train, X_val, X_test, y_train, y_val, y_test = raw_splits
         folds_raw.append(
             {
@@ -102,6 +113,11 @@ def main():
             }
         )
     elif mode == "cv":
+        raw_splits = temporal_cv_splits(
+            X_base,
+            y_base,
+            n_splits=cfg.split.n_splits,
+        )
         for idx, split in enumerate(raw_splits):
             X_train, X_val, X_test, y_train, y_val, y_test = split
             folds_raw.append(
@@ -117,7 +133,7 @@ def main():
             )
     else:
         raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
-
+    
     # Applica OHE/FE/scaling per ogni fold in modo indipendente (fit solo sul train del fold)
     folds_processed = []
     for fr in folds_raw:
@@ -136,11 +152,16 @@ def main():
             f"{list(X_train_feat.columns)}"
         )
 
-        # 7) Scaling opzionale (fit su train)
-        scaler = fit_scaler_on_train(X_train_feat, mode=scaling_mode)
+        # 7) Scaling opzionale (fit SOLO su train, sia X che y)
+        scaler = fit_scaler_on_train(X_train_feat, fr["y_train"], mode=scaling_mode)
+
         X_train_scaled = apply_scaler(X_train_feat, scaler)
-        X_val_scaled = apply_scaler(X_val_feat, scaler)
-        X_test_scaled = apply_scaler(X_test_feat, scaler) if X_test_feat is not None else None
+        X_val_scaled   = apply_scaler(X_val_feat, scaler)
+        X_test_scaled  = apply_scaler(X_test_feat, scaler) if X_test_feat is not None else None
+
+        y_train_scaled = apply_scaler(fr["y_train"], scaler, is_target=True)
+        y_val_scaled   = apply_scaler(fr["y_val"], scaler, is_target=True)
+        y_test_scaled  = apply_scaler(fr["y_test"], scaler, is_target=True) if fr["y_test"] is not None else None
 
         folds_processed.append(
             {
@@ -148,54 +169,45 @@ def main():
                 "X_train": X_train_scaled,
                 "X_val": X_val_scaled,
                 "X_test": X_test_scaled,
-                "y_train": fr["y_train"],
-                "y_val": fr["y_val"],
-                "y_test": fr["y_test"],
+                "y_train": y_train_scaled,
+                "y_val": y_val_scaled,
+                "y_test": y_test_scaled,
+                "scaler": scaler,
             }
         )
+        
 
     if mode == "train_val_test":
         p = folds_processed[0]
+        
+         # --- Salvo scaler e test set per evaluate.py ---
+        os.makedirs("artifacts", exist_ok=True)
 
+        # 1) scaler (serve per inverse-transform di y)
+        with open("artifacts/scaler.pkl", "wb") as f:
+            pickle.dump(p["scaler"], f)
+
+        # 2) X_test e y_test già scalati (come usati dal modello) --> DEVO FARLO ANCHE IN CROSS VALIDATION
+        np.save("artifacts/X_test_scaled.npy", p["X_test"].to_numpy(dtype="float32"))
+        np.save("artifacts/y_test_scaled.npy", p["y_test"].to_numpy(dtype="float32"))
+        
         # 8) Salvataggi facoltativi dei dataset con feature ingegnerizzate
+        p["y_train"].to_csv("data/processed/y_train_scaled.csv")
+        p["y_val"].to_csv("data/processed/y_val_scaled.csv")
+        p["y_test"].to_csv("data/processed/y_test_scaled.csv")
+
         save_feature_engineered_X(p["X_train"], out_path=cfg.paths.X_train_feat_out)
         save_feature_engineered_X(p["X_val"], out_path=cfg.paths.X_val_feat_out)
         save_feature_engineered_X(p["X_test"], out_path=cfg.paths.X_test_feat_out)
 
-        scaled_splits = (
-            p["X_train"],
-            p["X_val"],
-            p["X_test"],
-            p["y_train"],
-            p["y_val"],
-            p["y_test"],
-        )
-        train_loader, val_loader, test_loader = build_dataloaders_from_splits(
-            scaled_splits,
-            mode="train_val_test",
-            config=data_config,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+        train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
+        val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+        test_ds = PVForecastDataset(p["X_test"], p["y_test"], data_config)
 
-        '''# --- DEBUG: controlliamo NaN/Inf nei dati del dataloader ---
-        import torch
+        train_loader = build_dataloader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        test_loader = build_dataloader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-        first_batch = next(iter(train_loader))
-        x = first_batch["x_hist"]
-        y = first_batch["y_future"]
-
-        print("[DEBUG] x_hist shape:", x.shape)
-        print("[DEBUG] y_future shape:", y.shape)
-        print("[DEBUG] x_hist has NaN:", torch.isnan(x).any().item())
-        print("[DEBUG] y_future has NaN:", torch.isnan(y).any().item())
-        print("[DEBUG] x_hist has Inf:", torch.isinf(x).any().item())
-        print("[DEBUG] y_future has Inf:", torch.isinf(y).any().item())
-        
-        print("[DEBUG] NaN in X_train:", p["X_train"].isna().sum().sum())
-        print("[DEBUG] NaN in y_train:", p["y_train"].isna().sum().sum())
-        ### --- fine debug'''
-        
         print(
             f"[SPLIT] train: {p['X_train'].shape}, "
             f"val: {p['X_val'].shape}, "
@@ -215,27 +227,48 @@ def main():
             f"val batches: {len(val_loader)}, "
             f"test batches: {len(test_loader)}"
         )
+
     else:
         # 8) DataLoader per CV (include test comune)
-        folds_scaled = [
-            (
-                p["X_train"],
-                p["X_val"],
-                p["X_test"],
-                p["y_train"],
-                p["y_val"],
-                p["y_test"],
-            )
-            for p in folds_processed
-        ]
+        cv_loaders = []
+        for p in folds_processed:
+            # salvataggio y
+            fold_id = p["fold"]
 
-        cv_loaders = build_dataloaders_from_splits(
-            folds_scaled,
-            mode="cv",
-            config=data_config,
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
+            # Percorsi dei file
+            y_train_path = f"data/processed/y_train_scaled_fold{fold_id}.csv"
+            y_val_path   = f"data/processed/y_val_scaled_fold{fold_id}.csv"
+            y_test_path  = f"data/processed/y_test_scaled_fold{fold_id}.csv"
+
+            # Salvataggio
+            p["y_train"].to_csv(y_train_path)
+            p["y_val"].to_csv(y_val_path)
+            if p["y_test"] is not None:
+                p["y_test"].to_csv(y_test_path)
+
+            print(f"[SAVE][fold {fold_id}] salvati y scalati in:")
+            print("  ", y_train_path)
+            print("  ", y_val_path)
+            if p["y_test"] is not None:
+                print("  ", y_test_path)
+
+            
+            train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
+            val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+            test_ds = PVForecastDataset(p["X_test"], p["y_test"], data_config)
+
+            train_loader = build_dataloader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+            val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            test_loader = build_dataloader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+            cv_loaders.append(
+                {
+                    "fold": p["fold"],
+                    "train_loader": train_loader,
+                    "val_loader": val_loader,
+                    "test_loader": test_loader,
+                }
+            )
 
         for f, p in zip(cv_loaders, folds_processed):
             print(
@@ -273,6 +306,10 @@ def main():
             config=cfg.training,
             device=device,
         )
+
+        # salvo il modello migliore
+        best_model = result["model"]
+        torch.save(best_model.state_dict(), "artifacts/model_gru.pth")
 
 
     elif mode == "cv":

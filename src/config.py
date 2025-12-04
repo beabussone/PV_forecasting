@@ -61,8 +61,9 @@ class ExperimentConfig:
     # configurazione del dataset PV (finestra storica + orizzonte)
     data: PVDataConfig = field(
         default_factory=lambda: PVDataConfig(
-            history_hours=72,
+            history_hours=168, #proviamo 7giorni (migliore), 5giorni, altrimenti 72ore
             horizon_hours=24,
+            stride = 1,
             include_future_covariates=False,
         )
     )
@@ -73,12 +74,12 @@ class ExperimentConfig:
     # input_size e horizon li sovrascriviamo a runtime in base ai dati
     model: ModelConfig = field(
         default_factory=lambda: ModelConfig(
-            model_name="lstm",
+            model_name="gru",
             input_size=1,     # placeholder, aggiornato nel main
             horizon=24,       # placeholder
-            hidden_size=32,
+            hidden_size=32,     #16 per GRU MASE=0.95 #32 provato con conv2d, 32 con GRU MASE=0.92
             num_layers=2,
-            dropout=0.5,
+            dropout=0.3, # 0.3 bene per GRU
         )
     )
 
@@ -86,8 +87,8 @@ class ExperimentConfig:
     training: TrainingConfig = field(
         default_factory=lambda: TrainingConfig(
             epochs=50,
-            lr=1e-3,
-            weight_decay=0.0,
+            lr=5e-4,
+            weight_decay=1e-4,
             patience=5,
             min_delta=0.0,
         )
