@@ -1,5 +1,6 @@
 # main.py
 
+import torch
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
 from src.preprocessing import (
@@ -18,21 +19,25 @@ from src.feature_engineering import (
     save_feature_engineered_X,
 )
 from src.data_module import (
-    PVDataConfig,
     temporal_train_val_test_split,
     temporal_cv_splits,
     PVForecastDataset,
     build_dataloader,
 )
-
+from src.config import ExperimentConfig
 
 def main():
     print("=== PV Forecasting Pipeline ===")
 
+    # -----------------------------
+    # Config globale dell’esperimento
+    # -----------------------------
+    cfg = ExperimentConfig()
+
     # 1) Caricamento dataset
     X_raw, y_raw = load_datasets(
-        wx_path="data/wx_dataset.xlsx",
-        pv_path="data/pv_dataset.xlsx"
+        wx_path=cfg.paths.wx_path,
+        pv_path=cfg.paths.pv_path,
     )
     print(f"[LOAD] X_raw: {X_raw.shape}, y_raw: {y_raw.shape}")
 
@@ -54,21 +59,21 @@ def main():
     )
     print(f"[BASE] X_base: {X_base.shape}, y_base: {y_base.shape}")
 
-    # 4) Split temporale (prima di OHE/feature engineering) per evitare leakage tra split.
-    #    'mode' decide se usare holdout (train_val_test) o CV con test fisso.
-    mode = "train_val_test"  # "train_val_test" oppure "cv"
-    train_ratio = 0.7
-    val_ratio = 0.15
-    n_splits = 5
+    # 4) Split temporale (prima di OHE/feature engineering)
+    mode = cfg.split.mode
+    '''raw_splits = prepare_data_splits(
+        X_base,
+        y_base,
+        mode=mode,
+        train_ratio=cfg.split.train_ratio,
+        val_ratio=cfg.split.val_ratio,
+        n_splits=cfg.split.n_splits,
+    )'''
 
-    data_config = PVDataConfig(
-        history_hours=72,
-        horizon_hours=24,
-        include_future_covariates=False,
-    )
-    batch_size = 64
-    num_workers = 0
-    scaling_mode = "standard"
+    data_config = cfg.data
+    batch_size = cfg.dataloader.batch_size
+    num_workers = cfg.dataloader.num_workers
+    scaling_mode = cfg.dataloader.scaling_mode
 
     # Blocco FE riutilizzabile per evitare duplicazione tra train/val/test o tra fold
     def fe_block(df):
@@ -79,13 +84,14 @@ def main():
         return out
 
     # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
+    # Normalizza gli split in una lista di fold con test (TVT = 1 fold, CV = n fold)
     folds_raw = []
     if mode == "train_val_test":
         raw_splits = temporal_train_val_test_split(
             X_base,
             y_base,
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
+            train_ratio=cfg.train_ratio,
+            val_ratio=cfg.val_ratio,
         )
         X_train, X_val, X_test, y_train, y_val, y_test = raw_splits
         folds_raw.append(
@@ -103,7 +109,7 @@ def main():
         raw_splits = temporal_cv_splits(
             X_base,
             y_base,
-            n_splits=n_splits,
+            n_splits=cfg.n_splits,
         )
         for idx, split in enumerate(raw_splits):
             X_train, X_val, X_test, y_train, y_val, y_test = split
@@ -120,7 +126,7 @@ def main():
             )
     else:
         raise ValueError("mode deve essere 'train_val_test' oppure 'cv'")
-
+    
     # Applica OHE/FE/scaling per ogni fold in modo indipendente (fit solo sul train del fold)
     folds_processed = []
     for fr in folds_raw:
@@ -161,9 +167,9 @@ def main():
         p = folds_processed[0]
 
         # 8) Salvataggi facoltativi dei dataset con feature ingegnerizzate
-        save_feature_engineered_X(p["X_train"], out_path="data/processed/X_train_feat.csv")
-        save_feature_engineered_X(p["X_val"], out_path="data/processed/X_val_feat.csv")
-        save_feature_engineered_X(p["X_test"], out_path="data/processed/X_test_feat.csv")
+        save_feature_engineered_X(p["X_train"], out_path=cfg.paths.X_train_feat_out)
+        save_feature_engineered_X(p["X_val"], out_path=cfg.paths.X_val_feat_out)
+        save_feature_engineered_X(p["X_test"], out_path=cfg.paths.X_test_feat_out)
 
         train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
         val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
@@ -192,6 +198,7 @@ def main():
             f"val batches: {len(val_loader)}, "
             f"test batches: {len(test_loader)}"
         )
+
     else:
         # 8) DataLoader per CV (include test comune)
         cv_loaders = []
@@ -229,6 +236,7 @@ def main():
             )
     print("=== Pipeline completata. Dataset e DataLoader pronti per il training PyTorch. ===")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == "__main__":
     main()
