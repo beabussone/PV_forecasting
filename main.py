@@ -30,8 +30,6 @@ from src.data_module import (
     build_dataloader,
 )
 from src.config import ExperimentConfig
-from src.models import build_model
-from src.training import fit, evaluate
 
 def main():
     print("=== PV Forecasting Pipeline ===")
@@ -168,22 +166,26 @@ def main():
         p = folds_processed[0]
 
         # --- Salvo scaler e validation set per evaluate.py ---
-        scaler_path = os.path.join(cfg.paths.artifacts_dir, "scaler.pkl")
+        scaler_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.scaler_filename)
         with open(scaler_path, "wb") as f:
             pickle.dump(p["scaler"], f)
 
         np.save(
-            os.path.join(cfg.paths.artifacts_dir, "X_val_scaled.npy"),
+            os.path.join(cfg.paths.artifacts_dir, cfg.paths.X_val_filename),
             p["X_val"].to_numpy(dtype="float32"),
         )
         np.save(
-            os.path.join(cfg.paths.artifacts_dir, "y_val_scaled.npy"),
+            os.path.join(cfg.paths.artifacts_dir, cfg.paths.y_val_filename),
             p["y_val"].to_numpy(dtype="float32"),
         )
 
         # y scalate per MASE
-        p["y_train"].to_csv(os.path.join(cfg.paths.processed_dir, "y_train_scaled.csv"))
-        p["y_val"].to_csv(os.path.join(cfg.paths.processed_dir, "y_val_scaled.csv"))
+        p["y_train"].to_csv(
+            os.path.join(cfg.paths.processed_dir, cfg.paths.y_train_filename)
+        )
+        p["y_val"].to_csv(
+            os.path.join(cfg.paths.processed_dir, cfg.paths.y_val_out_filename)
+        )
 
         # Dataset + DataLoader
         train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
@@ -222,11 +224,11 @@ def main():
             # Salvataggio y scalate per fold (per MASE / debug)
             y_train_path = os.path.join(
                 cfg.paths.processed_dir,
-                f"y_train_scaled_fold{fold_id}.csv",
+                cfg.paths.y_train_fold_template.format(fold=fold_id),
             )
             y_val_path = os.path.join(
                 cfg.paths.processed_dir,
-                f"y_val_scaled_fold{fold_id}.csv",
+                cfg.paths.y_val_out_fold_template.format(fold=fold_id),
             )
 
             p["y_train"].to_csv(y_train_path)
@@ -239,7 +241,7 @@ def main():
             # Salvo scaler e validation set scalati PER FOLD per evaluate_cv
             scaler_path = os.path.join(
                 cfg.paths.artifacts_dir,
-                f"scaler_fold{fold_id}.pkl",
+                cfg.paths.scaler_fold_template.format(fold=fold_id),
             )
             with open(scaler_path, "wb") as f_sc:
                 pickle.dump(p["scaler"], f_sc)
@@ -247,14 +249,14 @@ def main():
             np.save(
                 os.path.join(
                     cfg.paths.artifacts_dir,
-                    f"X_val_scaled_fold{fold_id}.npy",
+                    cfg.paths.X_val_fold_template.format(fold=fold_id),
                 ),
                 p["X_val"].to_numpy(dtype="float32"),
             )
             np.save(
                 os.path.join(
                     cfg.paths.artifacts_dir,
-                    f"y_val_scaled_fold{fold_id}.npy",
+                    cfg.paths.y_val_fold_template.format(fold=fold_id),
                 ),
                 p["y_val"].to_numpy(dtype="float32"),
             )
@@ -316,11 +318,11 @@ def main():
             device=device,
         )
 
-        best_model = result["model"]
-        torch.save(
-            best_model.state_dict(),
-            os.path.join(cfg.paths.artifacts_dir, "model_tcn.pth"),
-        )
+            best_model = result["model"]
+            torch.save(
+                best_model.state_dict(),
+                os.path.join(cfg.paths.artifacts_dir, cfg.paths.model_filename),
+            )
     else:  # cv
         val_scores = []
         for p, fold_data in zip(folds_processed, loaders):
@@ -349,7 +351,7 @@ def main():
 
             model_path = os.path.join(
                 cfg.paths.artifacts_dir,
-                f"model_tcn_fold{fold_id}.pth",
+                cfg.paths.model_fold_template.format(fold=fold_id),
             )
             torch.save(best_model.state_dict(), model_path)
             print(f"[SAVE][fold {fold_id}] modello salvato in {model_path}")
@@ -357,8 +359,7 @@ def main():
         if val_scores:
             val_mean = float(np.mean(val_scores))
             val_std = float(np.std(val_scores))
-            print(f"[CV][VAL] mean MSE: {val_mean:.4f} | std: {val_std:.4f}")
-'''
+            print(f"[CV][VAL] mean MSE: {val_mean:.4f} | std: {val_std:.4f}")'''
 
 if __name__ == "__main__":
     main()

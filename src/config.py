@@ -15,6 +15,19 @@ class PathsConfig:
     pv_path: str = "data/pv_dataset.xlsx"
     processed_dir: str = "data/processed"
     artifacts_dir: str = "artifacts"
+    # nomi/pattern per artifact salvati (personalizzabili per modelli diversi)
+    model_filename: str = "model_tcn.pth"
+    model_fold_template: str = "model_tcn_fold{fold}.pth"
+    scaler_filename: str = "scaler.pkl"
+    scaler_fold_template: str = "scaler_fold{fold}.pkl"
+    X_val_filename: str = "X_val_scaled.npy"
+    y_val_filename: str = "y_val_scaled.npy"
+    X_val_fold_template: str = "X_val_scaled_fold{fold}.npy"
+    y_val_fold_template: str = "y_val_scaled_fold{fold}.npy"
+    y_train_filename: str = "y_train_scaled.csv"
+    y_train_fold_template: str = "y_train_scaled_fold{fold}.csv"
+    y_val_out_filename: str = "y_val_scaled.csv"
+    y_val_out_fold_template: str = "y_val_scaled_fold{fold}.csv"
 
     # salvataggi feature-engineered (opzionali)
     X_train_feat_out: str = "data/processed/X_train_feat.csv"
@@ -54,7 +67,7 @@ class ModelConfig:
     hidden: int = 64
     kernel_size: int = 3
     n_blocks: int = 3
-    dropout: float = 0.5
+    dropout: float = 0.2
     input_size: Optional[int] = None
     horizon: Optional[int] = None
 
@@ -81,7 +94,7 @@ class ExperimentConfig:
     # configurazione del dataset PV (finestra storica + orizzonte)
     data: PVDataConfig = field(
         default_factory=lambda: PVDataConfig(
-            history_hours=168,
+            history_hours=72,
             horizon_hours=24,
             stride = 1,
             include_future_covariates=False,
