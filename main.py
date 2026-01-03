@@ -1,11 +1,8 @@
 # main.py
 
-import torch
-import torch.nn as nn
 import numpy as np
 import os
 import pickle
-
 from src.data_upload import load_datasets
 from src.EDA import run_basic_eda, analyze_feature_label_correlations
 from src.preprocessing import (
@@ -51,8 +48,8 @@ def main():
     print(f"[SITE] lat={lat}, lon={lon}")
 
     # 2) EDA + analisi con la label (solo stampe / info, niente modifiche)
-    '''run_basic_eda(X_raw, y_raw)
-    analyze_feature_label_correlations(X_raw, y_raw, label_col="kwp")'''
+    run_basic_eda(X_raw, y_raw)
+    analyze_feature_label_correlations(X_raw, y_raw, label_col="kwp")
 
     # 3) Preprocessing deterministico: missing, timezone+cyc, allineamento, float32.
     #    Qui non si fa alcun fit, così i passi successivi lavorano su dati puliti ma non “sbilanciati”.
@@ -63,7 +60,7 @@ def main():
         save_processed=True,
     )
     print(f"[BASE] X_base: {X_base.shape}, y_base: {y_base.shape}")
-
+    
     # 4) Split temporale (prima di OHE/feature engineering)
     mode = cfg.split.mode
     data_config = cfg.data
@@ -216,6 +213,7 @@ def main():
         )
 
         loaders = {"train_loader": train_loader, "val_loader": val_loader}
+
     else:  # mode == "cv"
         cv_loaders = []
         for p in folds_processed:
@@ -318,11 +316,12 @@ def main():
             device=device,
         )
 
-            best_model = result["model"]
-            torch.save(
-                best_model.state_dict(),
-                os.path.join(cfg.paths.artifacts_dir, cfg.paths.model_filename),
-            )
+        best_model = result["model"]
+        criterion = nn.MSELoss()
+        val_loss = evaluate(best_model, fold_data["val_loader"], criterion, device)
+        val_scores.append(val_loss)
+        print(f"[METRICS][fold {fold_id}] Val MSE: {val_loss:.4f}")
+        
     else:  # cv
         val_scores = []
         for p, fold_data in zip(folds_processed, loaders):

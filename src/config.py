@@ -81,6 +81,17 @@ class TrainingConfig:
 
 
 # -----------------------------
+# Config baseline ML
+# -----------------------------
+
+@dataclass
+class BaselineConfig:
+    enabled: bool = True
+    ridge_alpha: float = 1.0
+    mase_seasonal_m: int = 24
+
+
+# -----------------------------
 # Config "alto livello" di tutto l’esperimento
 # -----------------------------
 
@@ -104,3 +115,4 @@ class ExperimentConfig:
     dataloader: DataloaderConfig = field(default_factory=DataloaderConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    baseline: BaselineConfig = field(default_factory=BaselineConfig)

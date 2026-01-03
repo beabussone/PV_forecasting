@@ -10,7 +10,7 @@ Modello end-to-end per prevedere la potenza di un impianto PV a partire da dati 
 
 ## Struttura dei file
 - `main.py`: entrypoint della pipeline; orchestra caricamento, EDA, preprocessing, split temporali, OHE, feature engineering, scaling, standardizzazione della `y`, DataLoader e training TCN con plot delle loss.
-- `src/config.py`: tutte le configurazioni (percorsi dati, split, `PVDataConfig`, batch/num_workers, scaler mode, hyperparam TCN, training params, path plot loss).
+- `src/config.py`: tutte le configurazioni (percorsi dati, split, `PVDataConfig`, batch/num_workers, scaler mode, hyperparam modello, training params, path plot loss).
 - `src/data_upload.py`: lettura dei file Excel grezzi (`data/wx_dataset.xlsx`, `data/pv_dataset.xlsx`) con gestione dei fogli e check sull'engine `openpyxl`.
 - `src/EDA.py`: stampe di controllo e generazione dei plot EDA (`eda_plots/*.png` e `numeric_stats.csv`).
 - `src/preprocessing.py`: imputazione `rain_1h`, estrazione/rimozione di lat/lon, fix timezone (UTC+10), encoding ciclico ora/mese, allineamento X-y, OHE con vocabolario fisso e scaler standard/minmax fittati sul solo train.
@@ -53,6 +53,16 @@ L’EDA controlla qualità e distribuzioni delle variabili meteo e della label P
 - ![Pioggia 1h](eda_plots/hist_rain_1h.png) Dominata dagli zeri; l’imputazione a 0 non introduce rumore.
 - ![Nuvolosità](eda_plots/hist_clouds_all.png) Distribuzione quasi uniforme → `cloud_effect` come attenuazione continua.
 - ![Classi meteo - bar](eda_plots/bar_weather_description.png) e ![Classi meteo - pie](eda_plots/pie_weather_description.png) Poche classi prevalenti, molte rare: giustifica il bucket `other`.
+
+### Analisi temporale avanzata (eda_plots/temporal)
+Questi grafici servono per capire struttura, stagionalita e dipendenze della serie PV, e quindi guidare la scelta del modello e della finestra storica.
+
+- ![Profilo giornaliero](eda_plots/temporal/daily_profile_kwp.png) Media oraria della produzione: curva a campana con minimi notturni e picco nelle ore centrali. La pendenza di salita/discesa indica l'asimmetria mattino/pomeriggio e conferma che il segnale e dominato dal ciclo diurno → suggerisce modelli che catturano pattern intraday e finestre storiche che coprano un intero giorno.
+- ![Decomposizione stagionale](eda_plots/temporal/seasonal_decomp_kwp.png) Scomposizione in trend, stagionale e residuo: il trend mostra variazioni lente (stagioni o degradazione), la componente stagionale evidenzia oscillazioni regolari, il residuo mostra rumore e eventi improvvisi (nubi) → motiva feature di calendario/cicliche e modelli capaci di separare trend da stagionalita.
+- ![ACF/PACF](eda_plots/temporal/acf_pacf_kwp.png) L'ACF evidenzia memoria a lag brevi e risonanze a 24h/48h; la PACF mostra i lag realmente informativi una volta tolta la dipendenza indiretta → aiuta a scegliere `history_hours`, il numero di lags utili e supporta modelli sequence-based (TCN/LSTM).
+- ![Spettro di potenza](eda_plots/temporal/power_spectrum_kwp.png) L'energia e concentrata su frequenze giornaliere (e secondariamente settimanali), con armoniche che descrivono la forma non sinusoidale del profilo PV → conferma periodicita, giustifica encoding ciclico e modelli con capacita di catturare componenti periodiche multiple.
+
+In sintesi: la forte periodicita e l'autocorrelazione suggeriscono modelli temporali con memoria (TCN) e una finestra storica che copra almeno il ciclo giornaliero; la stagionalita piu lenta giustifica feature di calendario e split temporali rigorosi per evitare leakage.
 
 # Ciclical Encoding
 Per rendere il tempo digeribile dal modello:
