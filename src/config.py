@@ -109,6 +109,7 @@ class ExperimentConfig:
             horizon_hours=24,
             stride = 1,
             include_future_covariates=False,
+            include_past_target=True
         )
     )
 

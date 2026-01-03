@@ -19,17 +19,23 @@ class PVDataConfig:
     - include_future_covariates: se True, restituisce anche X_future
       (le covariate future sullo stesso orizzonte della label)
     - stride: passo della sliding window (default 1)
+    - include_past_target: se True, concatena la y passata (kwp)
+      dentro x_hist per forecasting autoregressivo senza leakage.
     """
     history_hours: int = 72
     horizon_hours: int = 24
     include_future_covariates: bool = False
     stride: int = 1
+    include_past_target: bool = True
 
 
 class PVForecastDataset(Dataset):
     """
     Genera finestre storiche (history) e target multistep (horizon) da serie orarie.
     Opzionalmente restituisce covariate future se disponibili nel train.
+
+    PATCH: opzionalmente concatena la y passata (kwp fino a t) dentro x_hist
+           per fare forecasting autoregressivo senza leakage.
     """
 
     def __init__(
@@ -53,6 +59,9 @@ class PVForecastDataset(Dataset):
         self.horizon = config.horizon_hours
         self.stride = config.stride
         self.include_future_covariates = config.include_future_covariates
+
+        # 🔽 nuovo flag (non rompe nulla: se non esiste nel config → False)
+        self.include_past_target = bool(getattr(config, "include_past_target", False))
 
         if self.stride <= 0:
             raise ValueError("stride deve essere >= 1.")
@@ -79,8 +88,14 @@ class PVForecastDataset(Dataset):
         h_end = h_start + self.history
         f_end = h_end + self.horizon
 
-        x_hist = self.X_values[h_start:h_end]
-        y_future = self.y_values[h_end:f_end]
+        x_hist = self.X_values[h_start:h_end]           # (H, F)
+        y_future = self.y_values[h_end:f_end]           # (K,)
+
+        # ✅ PATCH: aggiungo la y passata (kwp) alle feature storiche
+        # y_past copre gli stessi istanti di x_hist: [h_start, ..., h_end-1]
+        if self.include_past_target:
+            y_past = self.y_values[h_start:h_end].astype(np.float32).reshape(-1, 1)  # (H, 1)
+            x_hist = np.concatenate([x_hist, y_past], axis=1)                        # (H, F+1)
 
         sample = {
             "x_hist": torch.from_numpy(x_hist),

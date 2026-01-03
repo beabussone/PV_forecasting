@@ -303,7 +303,7 @@ def main():
     if mode == "train_val":
         # recupero info dal dataset
         train_dataset = loaders["train_loader"].dataset
-        cfg.model.input_size = train_dataset.X_values.shape[1]
+        cfg.model.input_size = train_dataset.X_values.shape[1] + (1 if getattr(cfg.data, "include_past_target", False) else 0)
         cfg.model.horizon = train_dataset.horizon
 
         model = build_model(cfg.model, device=device)
