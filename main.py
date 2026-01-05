@@ -25,6 +25,7 @@ from src.data_module import (
     temporal_cv_splits_train_val,
     PVForecastDataset,
     build_dataloader,
+    make_val_with_context,
 )
 from src.config import ExperimentConfig
 
@@ -186,7 +187,22 @@ def main():
 
         # Dataset + DataLoader
         train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
-        val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+
+        # ✅ Validation con context dal train
+        X_val_ctx, y_val_ctx, min_start = make_val_with_context(
+            p["X_train"],
+            p["y_train"],
+            p["X_val"],
+            p["y_val"],
+            history=data_config.history_hours,
+        )
+
+        val_ds = PVForecastDataset(
+            X_val_ctx,
+            y_val_ctx,
+            data_config,
+            min_start_idx=min_start,   # <-- solo se hai aggiunto min_start_idx nel Dataset
+        )
 
         train_loader = build_dataloader(
             train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
@@ -261,7 +277,22 @@ def main():
 
             # Dataset + DataLoader per fold
             train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
-            val_ds = PVForecastDataset(p["X_val"], p["y_val"], data_config)
+
+            # ✅ Validation con context dal train (per questo fold)
+            X_val_ctx, y_val_ctx, min_start = make_val_with_context(
+                p["X_train"],
+                p["y_train"],
+                p["X_val"],
+                p["y_val"],
+                history=data_config.history_hours,
+            )
+
+            val_ds = PVForecastDataset(
+                X_val_ctx,
+                y_val_ctx,
+                data_config,
+                min_start_idx=min_start,  # <-- solo se hai min_start_idx nel Dataset
+            )
 
             train_loader = build_dataloader(
                 train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers

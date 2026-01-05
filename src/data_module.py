@@ -43,6 +43,7 @@ class PVForecastDataset(Dataset):
         X: pd.DataFrame,
         y: pd.DataFrame,
         config: Optional[PVDataConfig] = None,
+        min_start_idx: int = 0,
     ):
         if config is None:
             config = PVDataConfig()
@@ -76,6 +77,16 @@ class PVForecastDataset(Dataset):
         if max_start <= 0:
             raise ValueError("Serie troppo corta rispetto a history+horizon.")
         self.start_indices = list(range(0, max_start, self.stride))
+
+        self.min_start_idx = int(min_start_idx)
+
+        max_start = len(self.X_values) - (self.history + self.horizon) + 1
+        if max_start <= 0:
+            raise ValueError("Serie troppo corta rispetto a history+horizon.")
+
+        # start_indices validi, poi filtro quelli < min_start_idx
+        all_starts = list(range(0, max_start, self.stride))
+        self.start_indices = [s for s in all_starts if s >= self.min_start_idx]
 
     def __len__(self):
         return len(self.start_indices)
@@ -204,6 +215,17 @@ def temporal_cv_splits_train_val(
 
     return splits
 
+
+def make_val_with_context(
+    X_train: pd.DataFrame,
+    y_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_val: pd.DataFrame,
+    history: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+    X_ctx = pd.concat([X_train.tail(history), X_val], axis=0)
+    y_ctx = pd.concat([y_train.tail(history), y_val], axis=0)
+    return X_ctx, y_ctx, history  # min_start_idx
 
 # ============================================================
 # DataLoader helper
