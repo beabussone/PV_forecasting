@@ -15,7 +15,7 @@ Modello end-to-end per prevedere la potenza di un impianto PV a partire da dati 
 - `src/EDA.py`: stampe di controllo e generazione dei plot EDA (`eda_plots/*.png` e `numeric_stats.csv`).
 - `src/preprocessing.py`: imputazione `rain_1h`, estrazione/rimozione di lat/lon, fix timezone (UTC+10), encoding ciclico ora/mese, allineamento X-y, OHE con vocabolario fisso e scaler standard/minmax fittati sul solo train.
 - `src/feature_engineering.py`: feature fisiche (angoli solari, clearness index, effective irradiance, cloud_effect, minuti da/alba/tramonto) e salvataggio delle matrici con feature.
-- `src/data_module.py`: split temporali (holdout o CV), dataset a finestre per serie storiche (`history_hours`/`horizon_hours`) e DataLoader PyTorch.
+- `src/data_module.py`: split temporali (holdout o CV), dataset a finestre per serie storiche (`history_hours`/`horizon_hours`), aggiunta del contesto al validation e DataLoader PyTorch; supporta anche l'inclusione della y passata tra le feature del modello.
 - `requirements.txt`: dipendenze minime per eseguire pipeline, plot e PyTorch.
 - `data/processed/*.csv`: output intermedi (dopo preprocessing e feature engineering) salvati dal main.
 - `eda_plots/*.png`, `eda_plots/numeric_stats.csv`: grafici e statistiche descrittive prodotte dall'EDA.
@@ -28,7 +28,8 @@ Modello end-to-end per prevedere la potenza di un impianto PV a partire da dati 
 5. Fit OHE solo su train e applicazione a val/test.
 6. Feature engineering fisico (angoli solari, effective irradiance, cloud effect, timing solare) e scaling opzionale.
 7. Standardizza la `y` (mean/std calcolati sul solo train di ogni fold) per stabilizzare il training.
-8. Salva i dataset con feature (`data/processed/X_*_feat.csv`) e costruisce i DataLoader per il training PyTorch.
+8. Per il validation aggiunge un contesto storico (ultime `history_hours` del train) così le finestre non partono "a vuoto".
+9. Salva i dataset con feature (`data/processed/X_*_feat.csv`) e costruisce i DataLoader per il training PyTorch includendo, se configurato, la `y` passata dentro `x_hist`.
 9. Allena un TCN multi-step (horizon configurabile) con MSE, log delle loss train/val e plot salvato (`cfg.LOSS_PLOT_PATH`, default `eda_plots/loss_curve.png`); valuta sul test riportando MSE/RMSE in scala originale.
 
 ## Analisi Esplorativa dei Dati (EDA)
@@ -102,3 +103,6 @@ Feature fisiche aggiunte per migliorare le prestazioni senza usare il tilt reale
 ## Output del preprocessing
 - Dataset con feature: `data/processed/X_feat.csv` (o `X_*_feat.csv` per train/val/test).
 - Target: `data/processed/y_processed.csv`.
+
+## Note su data_module (modifiche recenti)
+- **Context nel validation**: quando si costruiscono i set di val, si premettono le ultime `history_hours` del train a `X_val` e `y_val` (funzione `make_val_with_context`). Questo evita finestre iniziali senza storia e rende la validazione coerente con la dinamica autoregressiva.
