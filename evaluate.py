@@ -9,7 +9,7 @@ import torch
 from src.data_module import PVForecastDataset, build_dataloader
 from src.models import build_model
 from src.config import ExperimentConfig
-from src.training import evaluate as eval_loss
+from src.training import evaluate_loss as eval_loss
 
 
 def inverse_scale_y(y_scaled, scaler):
