@@ -194,6 +194,10 @@ def fit(
     y_train_insample: Optional[Union[np.ndarray, torch.Tensor]] = None,
     mase_m: int = 24,
     keep_best_on_val: bool = True,
+    # modifica per tuning
+    early_stopping: bool = False,
+    patience: int = 5,
+    min_delta: float = 0.0,
     verbose: bool = True,
 ) -> FitResult:
     """
@@ -221,6 +225,8 @@ def fit(
 
     best_state: Optional[Dict[str, torch.Tensor]] = None
     best_val = float("inf")
+    # modifica per tuning
+    no_improve = 0
 
     for ep in range(1, epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, optimizer, device, loss_fn)
@@ -236,15 +242,29 @@ def fit(
             val_rmse.append(v_rmse)
             val_mase.append(v_mase)
 
-            if keep_best_on_val and v_loss < best_val:
+            # modifica per tuning
+            improved = v_loss < (best_val - min_delta)
+            if improved:
                 best_val = v_loss
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                if keep_best_on_val:
+                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
 
             if verbose:
                 msg = f"Epoch {ep:02d} | Train MSE: {tr_loss:.4f} | Val MSE: {v_loss:.4f} | Val RMSE: {v_rmse:.4f}"
                 if naive_scale is not None:
                     msg += f" | Val MASE: {v_mase:.4f}"
                 print(msg)
+
+            # modifica per tuning
+            if early_stopping and no_improve >= patience:
+                if verbose:
+                    print(
+                        f"Early stopping at epoch {ep:02d} (no improvement >= {min_delta} for {patience} epochs)."
+                    )
+                break
         else:
             if verbose:
                 print(f"Epoch {ep:02d} | Train MSE: {tr_loss:.4f}")
