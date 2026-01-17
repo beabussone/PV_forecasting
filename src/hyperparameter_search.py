@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import copy
 import math
@@ -52,6 +52,11 @@ def _get_model_key(cfg: Any, model_builder: Optional[Callable[..., nn.Module]] =
 
 def _resolve_search_space(cfg: Any, model_key: str, override: Optional[SearchSpace]) -> SearchSpace:
     if override is not None:
+        if isinstance(override, Mapping):
+            if model_key in override:
+                return override[model_key]
+            if "default" in override:
+                return override["default"]
         return override
 
     candidates = []
@@ -171,6 +176,28 @@ def _sync_model_dims_from_loader(cfg: Any, train_loader: DataLoader) -> None:
         setattr(cfg.model, "horizon", int(getattr(dataset, "horizon")))
 
 
+def _set_global_seed(seed: int, deterministic: bool) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def _reset_loader_seed(loader: Optional[DataLoader], seed: int) -> None:
+    if loader is None:
+        return
+    generator = getattr(loader, "generator", None)
+    if generator is not None:
+        try:
+            generator.manual_seed(int(seed))
+        except Exception:
+            pass
+
+
 def _pick_metric_from_fit_result(
     fit_result: Any,
     metric: str,
@@ -210,10 +237,9 @@ def _pick_metric_from_fit_result(
     return score, metrics
 
 
-def random_search(
+def random_search_cv(
     model_builder: Callable[[Any], nn.Module],
-    train_loader: DataLoader,
-    val_loader: Optional[DataLoader],
+    fold_loaders: List[Mapping[str, Any]],
     cfg: Any,
     *,
     search_space: Optional[SearchSpace] = None,
@@ -221,27 +247,19 @@ def random_search(
     metric: str = "loss",
     mode: str = "min",
     seed: int = 42,
+    deterministic: Optional[bool] = None,
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> RandomSearchResult:
-    """
-    Random search over hyperparameters defined in the config or provided search_space.
-
-    Expected search space format (example):
-        {
-            "model.hidden": (32, 256),
-            "model.dropout": [0.1, 0.2, 0.3],
-            "training.lr": {"type": "logfloat", "low": 1e-4, "high": 1e-2},
-            "training.epochs": {"type": "int", "low": 5, "high": 30},
-        }
-
-    The function applies sampled values on a deepcopy of cfg for each trial.
-    """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0")
+    if not fold_loaders:
+        raise ValueError("fold_loaders must be non-empty")
 
     device = device or torch.device("cpu")
     rng = random.Random(seed)
+    if deterministic is None:
+        deterministic = bool(getattr(getattr(cfg, "training", None), "deterministic", True))
 
     model_key = _get_model_key(cfg, model_builder=model_builder)
     space = _resolve_search_space(cfg, model_key, search_space)
@@ -253,49 +271,79 @@ def random_search(
 
     for trial_idx in range(1, n_trials + 1):
         params = _sample_params(rng, space)
-        cfg_trial = copy.deepcopy(cfg)
+        fold_scores: List[float] = []
+        fold_metrics: List[Dict[str, float]] = []
 
-        for key, value in params.items():
-            _set_by_path(cfg_trial, key, value)
+        for fold in fold_loaders:
+            cfg_trial = copy.deepcopy(cfg)
+            for key, value in params.items():
+                _set_by_path(cfg_trial, key, value)
 
-        _sync_model_dims_from_loader(cfg_trial, train_loader)
+            train_loader = fold.get("train_loader")
+            val_loader = fold.get("val_loader")
 
-        model = model_builder(cfg_trial.model)
+            if train_loader is None:
+                raise ValueError("Each fold must provide a train_loader.")
 
-        mase_m = getattr(getattr(cfg_trial, "baseline", None), "mase_seasonal_m", 24)
-        y_train_insample = getattr(getattr(train_loader, "dataset", None), "y_values", None)
+            _sync_model_dims_from_loader(cfg_trial, train_loader)
 
-        fit_result = fit(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=int(getattr(cfg_trial.training, "epochs", 10)),
-            lr=float(getattr(cfg_trial.training, "lr", 1e-3)),
-            device=device,
-            y_train_insample=y_train_insample,
-            mase_m=int(mase_m),
-            keep_best_on_val=True,
-            # modifica per tuning
-            early_stopping=bool(getattr(cfg_trial.training, "early_stopping", False)),
-            patience=int(getattr(cfg_trial.training, "patience", 5)),
-            min_delta=float(getattr(cfg_trial.training, "min_delta", 0.0)),
-            verbose=verbose,
+            fold_id = int(fold.get("fold", 0))
+            trial_seed = int(seed) + trial_idx * 1000 + fold_id * 10
+            _set_global_seed(trial_seed, deterministic)
+            _reset_loader_seed(train_loader, trial_seed)
+            _reset_loader_seed(val_loader, trial_seed + 1)
+
+            model = model_builder(cfg_trial.model)
+
+            mase_m = getattr(getattr(cfg_trial, "baseline", None), "mase_seasonal_m", 24)
+            y_train_insample = getattr(getattr(train_loader, "dataset", None), "y_values", None)
+
+            fit_result = fit(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=int(getattr(cfg_trial.training, "epochs", 10)),
+                lr=float(getattr(cfg_trial.training, "lr", 1e-3)),
+                device=device,
+                y_train_insample=y_train_insample,
+                mase_m=int(mase_m),
+                keep_best_on_val=True,
+                best_metric=metric,
+                early_stopping=bool(getattr(cfg_trial.training, "early_stopping", False)),
+                patience=int(getattr(cfg_trial.training, "patience", 5)),
+                min_delta=float(getattr(cfg_trial.training, "min_delta", 0.0)),
+                verbose=verbose,
+            )
+
+            score, metrics = _pick_metric_from_fit_result(fit_result, metric, mode)
+            fold_scores.append(score)
+            fold_metrics.append(metrics)
+
+        avg_score = float(np.mean(fold_scores))
+        avg_metrics = {
+            "loss": float(np.nanmean([m.get("loss", float("nan")) for m in fold_metrics])),
+            "rmse": float(np.nanmean([m.get("rmse", float("nan")) for m in fold_metrics])),
+            "mase": float(np.nanmean([m.get("mase", float("nan")) for m in fold_metrics])),
+        }
+
+        trials.append(
+            TrialResult(
+                params=params,
+                score=avg_score,
+                metrics=avg_metrics,
+                model_key=model_key,
+            )
         )
 
-        score, metrics = _pick_metric_from_fit_result(fit_result, metric, mode)
-
-        trials.append(TrialResult(params=params, score=score, metrics=metrics, model_key=model_key))
-
-        is_better = score < best_score
-        if is_better:
-            best_score = score
+        if avg_score < best_score:
+            best_score = avg_score
             best_params = params
-            best_metrics = metrics
+            best_metrics = avg_metrics
 
         if verbose:
             print(
-                f"[RANDOM_SEARCH][{trial_idx}/{n_trials}] params={params} "
-                f"| metrics={metrics}"
+                f"[RANDOM_SEARCH_CV][{trial_idx}/{n_trials}] params={params} "
+                f"| metrics={avg_metrics}"
             )
 
     return RandomSearchResult(

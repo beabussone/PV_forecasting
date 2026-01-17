@@ -5,11 +5,26 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from src.data_module import PVForecastDataset, build_dataloader
+from src.data_upload import load_test_datasets
 from src.models import build_model
 from src.config import ExperimentConfig
-from src.training import evaluate_loss as eval_loss
+from src.preprocessing import (
+    preprocess_pipeline,
+    extract_site_coords,
+    transform_ohe_with_vocab,
+    apply_scaler,
+)
+from src.feature_engineering import (
+    add_solar_features,
+    add_effective_features,
+    add_cloud_effect,
+    add_solar_time_features,
+)
 
 
 def inverse_scale_y(y_scaled, scaler):
@@ -74,256 +89,206 @@ def mase(y_true, y_pred, insample, m: int = 1) -> float:
     return mae_model / mae_naive
 
 
-def evaluate_validation_split(cfg, device):
+def _plot_weekly_forecast(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    output_path: str,
+    *,
+    seasonality: int = 24,
+    hours: int = 24 * 7,
+    start_idx: int | None = None,
+) -> str | None:
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    if y_true.ndim == 2:
+        y_true_series = y_true[:, 0]
+    else:
+        y_true_series = y_true.ravel()
+
+    if y_pred.ndim == 2:
+        y_pred_series = y_pred[:, 0]
+    else:
+        y_pred_series = y_pred.ravel()
+
+    if len(y_true_series) <= seasonality:
+        return None
+
+    if start_idx is None:
+        start_idx = seasonality
+    end_idx = min(start_idx + hours, len(y_true_series))
+    if end_idx <= start_idx:
+        return None
+
+    true_week = y_true_series[start_idx:end_idx]
+    pred_week = y_pred_series[start_idx:end_idx]
+    naive_week = y_true_series[start_idx - seasonality : end_idx - seasonality]
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    x = np.arange(len(true_week))
+    ax.plot(x, true_week, label="Ground truth", color="#1f77b4", linewidth=1.5)
+    ax.plot(x, pred_week, label="Model prediction", color="#2ca02c", linewidth=1.5)
+    ax.plot(x, naive_week, label=f"Naive (t-{seasonality})", color="#d62728", linewidth=1.2, linestyle="--")
+    ax.set_title("Forecast vs Naive (1-step) over 7 days")
+    ax.set_xlabel("Hours")
+    ax.set_ylabel("kW/kWp")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+    return output_path
+
+
+def evaluate_test_sheet(cfg, device):
     """
-    Valutazione sul validation set (split train/val 80/20).
+    Valutazione sul foglio test (es. "07-12--06-13").
     Usa:
-    - artifacts/{scaler_filename}
-    - artifacts/{X_val_filename}
-    - artifacts/{y_val_filename}
-    - data/processed/{y_train_filename} (per MASE)
     - artifacts/{model_filename}
+    - artifacts/{scaler_filename}
+    - artifacts/{ohe_vocab_filename}
+    - data/processed/{y_train_filename} (per MASE)
     """
-    print(">>> Modalità: train_val")
+    if cfg.split.mode not in {"train_val", "train_all"}:
+        raise ValueError("Per test serve un modello unico: usa mode='train_val' o 'train_all'.")
+
+    print(">>> Modalità: test sheet")
 
     artifacts_dir = cfg.paths.artifacts_dir
     processed_dir = cfg.paths.processed_dir
     batch_size = cfg.dataloader.batch_size
 
-    # 1. Carico scaler salvato
-    scaler_path = os.path.join(artifacts_dir, cfg.paths.scaler_filename)
-    scaler = pickle.load(open(scaler_path, "rb"))
-
-    # 2. Carico il validation set salvato dal main (già FE + scaling)
-    X_val_arr = np.load(os.path.join(artifacts_dir, cfg.paths.X_val_filename))
-    y_val_arr = np.load(os.path.join(artifacts_dir, cfg.paths.y_val_filename))
-
-    # Converto in DataFrame per soddisfare PVForecastDataset
-    X_val = pd.DataFrame(X_val_arr)
-
-    # y_val probabilmente è shape (N, 1) – ci assicuriamo che sia 2D
-    if y_val_arr.ndim == 1:
-        y_val_arr = y_val_arr.reshape(-1, 1)
-    y_val = pd.DataFrame(y_val_arr, columns=["kwp"])  # nome colonna coerente
-
-    val_ds = PVForecastDataset(
-        X_val,
-        y_val,
-        cfg.data,
+    X_raw, y_raw = load_test_datasets(
+        cfg.paths.wx_path,
+        cfg.paths.pv_path,
+        sheet_name=cfg.test.sheet_name,
     )
 
-    # LOADER
-    val_loader = build_dataloader(
-        val_ds,
+    lat, lon = extract_site_coords(X_raw)
+    X_base, y_base = preprocess_pipeline(
+        X_raw,
+        y_raw,
+        fixed_offset_hours=10,
+        debug=False,
+        save_processed=False,
+    )
+
+    vocab_path = os.path.join(artifacts_dir, cfg.paths.ohe_vocab_filename)
+    if not os.path.exists(vocab_path):
+        raise FileNotFoundError(f"OHE vocab non trovato: {vocab_path}")
+    with open(vocab_path, "rb") as f:
+        vocab = pickle.load(f)
+
+    X_enc = transform_ohe_with_vocab(X_base, vocab)
+    X_feat = add_solar_features(X_enc, lat, lon)
+    X_feat = add_effective_features(X_feat)
+    X_feat = add_cloud_effect(X_feat)
+    X_feat = add_solar_time_features(X_feat, lat)
+
+    scaler_path = os.path.join(artifacts_dir, cfg.paths.scaler_filename)
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler non trovato: {scaler_path}")
+    scaler = pickle.load(open(scaler_path, "rb"))
+
+    X_scaled = apply_scaler(X_feat, scaler)
+    y_scaled = apply_scaler(y_base, scaler, is_target=True)
+
+    test_ds = PVForecastDataset(X_scaled, y_scaled, cfg.data)
+    test_loader = build_dataloader(
+        test_ds,
         batch_size=batch_size,
         shuffle=False,
     )
 
-    # 3. Ricostruisco modello e carico pesi
-    cfg.model.input_size = val_ds.X_values.shape[1]
-    cfg.model.horizon = val_ds.horizon
+    sample = next(iter(test_loader))
+    cfg.model.input_size = int(sample["x_hist"].shape[-1])
+    cfg.model.horizon = int(test_ds.horizon)
 
     model = build_model(cfg.model, device)
     model_path = os.path.join(artifacts_dir, cfg.paths.model_filename)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    # 4. Metriche nello spazio scalato
-    criterion = torch.nn.MSELoss()
-    mse_scaled = eval_loss(model, val_loader, criterion, device)
-    rmse_scaled = float(np.sqrt(mse_scaled))
-
-    # 5. Predizioni + inverse scaling (validation)
     y_true_list = []
     y_pred_list = []
-
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in test_loader:
             x = batch["x_hist"].to(device)
             y = batch["y_future"].cpu().numpy()
             y_hat = model(x).cpu().numpy()
-
             y_true_list.append(y)
             y_pred_list.append(y_hat)
 
-    y_true_scaled = np.concatenate(y_true_list, axis=0)   # [N, H]
-    y_pred_scaled = np.concatenate(y_pred_list, axis=0)   # [N, H]
+    y_true_scaled = np.concatenate(y_true_list, axis=0)
+    y_pred_scaled = np.concatenate(y_pred_list, axis=0)
 
-    # inverse scaling in spazio reale (kW/kWp)
     y_true = inverse_scale_y(y_true_scaled, scaler)
     y_pred = inverse_scale_y(y_pred_scaled, scaler)
+    y_pred = np.maximum(y_pred, 0.0)
 
-    # metriche reali
     mae, mse, rmse = compute_metrics(y_true, y_pred)
 
-    # 6. MASE in spazio reale usando il train come "insample"
     y_train_path = os.path.join(processed_dir, cfg.paths.y_train_filename)
+    if not os.path.exists(y_train_path):
+        raise FileNotFoundError(f"y_train per MASE non trovato: {y_train_path}")
     y_train_scaled_df = pd.read_csv(y_train_path, index_col=0)
     y_train_scaled_arr = y_train_scaled_df.to_numpy(dtype=float)
-
-    # inverse scaling del train (insample)
     y_train_real = inverse_scale_y(y_train_scaled_arr, scaler)
-
     mase_value = mase(y_true, y_pred, insample=y_train_real, m=24)
 
-    # OUTPUT
-    print("\n=== Validation Metrics (scaled space) ===")
-    print(f"MSE  (scaled): {mse_scaled:.4f}")
-    print(f"RMSE (scaled): {rmse_scaled:.4f}")
+    seasonality = 24
+    hours = 24 * 7
+    y_true_series = np.asarray(y_true, dtype=float)
+    if y_true_series.ndim == 2:
+        y_true_series = y_true_series[:, 0]
+    max_start = len(y_true_series) - hours
+    base_start = seasonality
+    plot_starts: list[int] = []
+    if max_start > base_start:
+        rng = np.random.default_rng(42)
+        candidate_starts = np.arange(base_start, max_start)
+        if len(candidate_starts) >= 4:
+            random_starts = rng.choice(candidate_starts, size=3, replace=False).tolist()
+        else:
+            random_starts = candidate_starts.tolist()
+        plot_starts = [base_start] + random_starts
+    elif max_start > 0:
+        plot_starts = [base_start]
 
-    print("\n=== Validation Metrics (real space, kW/kWp) ===")
+    if not plot_starts:
+        print("\n[PLOT] Serie troppo corta per i grafici weekly.")
+    else:
+        for idx, start in enumerate(plot_starts, start=1):
+            plot_path = _plot_weekly_forecast(
+                y_true,
+                y_pred,
+                output_path=f"eda_plots/pred_vs_naive_week_{idx}.png",
+                seasonality=seasonality,
+                hours=hours,
+                start_idx=int(start),
+            )
+            if plot_path is not None:
+                print(f"\n[PLOT] Forecast vs naive salvato in {plot_path}")
+            else:
+                print("\n[PLOT] Serie troppo corta per il grafico weekly.")
+
+    print("\n=== Test Metrics (real space, kW/kWp) ===")
     print(f"MAE  (real): {mae:.4f}")
     print(f"MSE  (real): {mse:.4f}")
     print(f"RMSE (real): {rmse:.4f}")
-
-    print("\n=== Validation Metric: MASE (real space) ===")
     print(f"MASE (m=24): {mase_value:.4f}")
 
 
-def evaluate_cv(cfg, device):
-    """
-    Valutazione per la cross-validation temporale (solo train/val).
-    Per ogni fold k usa:
-    - artifacts/{scaler_fold_template.format(fold=k)}
-    - artifacts/{X_val_fold_template.format(fold=k)}
-    - artifacts/{y_val_fold_template.format(fold=k)}
-    - data/processed/{y_train_fold_template.format(fold=k)}
-    - artifacts/{model_fold_template.format(fold=k)}
-
-    Stampa metriche per fold + media complessiva.
-    """
-    print(">>> Modalità: cross-validation (cv)")
-
-    n_splits = cfg.split.n_splits
-    artifacts_dir = cfg.paths.artifacts_dir
-    processed_dir = cfg.paths.processed_dir
-    batch_size = cfg.dataloader.batch_size
-
-    all_mse_scaled = []
-    all_rmse_scaled = []
-    all_mae = []
-    all_mse = []
-    all_rmse = []
-    all_mase = []
-
-    for fold_id in range(n_splits):
-        print(f"\n--- Fold {fold_id} ---")
-
-        scaler_path = os.path.join(
-            artifacts_dir, cfg.paths.scaler_fold_template.format(fold=fold_id)
-        )
-        X_val_path = os.path.join(
-            artifacts_dir, cfg.paths.X_val_fold_template.format(fold=fold_id)
-        )
-        y_val_path = os.path.join(
-            artifacts_dir, cfg.paths.y_val_fold_template.format(fold=fold_id)
-        )
-        model_path = os.path.join(
-            artifacts_dir, cfg.paths.model_fold_template.format(fold=fold_id)
-        )
-        y_train_path = os.path.join(
-            processed_dir, cfg.paths.y_train_fold_template.format(fold=fold_id)
-        )
-
-        # se mancano i file di un fold, lo skippiamo (non crasha tutto)
-        if not (
-            os.path.exists(scaler_path)
-            and os.path.exists(X_val_path)
-            and os.path.exists(y_val_path)
-            and os.path.exists(model_path)
-            and os.path.exists(y_train_path)
-        ):
-            print(f"[WARN] Artifacts mancanti per fold {fold_id}, skip.")
-            continue
-
-        scaler = pickle.load(open(scaler_path, "rb"))
-        X_val_arr = np.load(X_val_path)
-        y_val_arr = np.load(y_val_path)
-
-        X_val = pd.DataFrame(X_val_arr)
-        if y_val_arr.ndim == 1:
-            y_val_arr = y_val_arr.reshape(-1, 1)
-        y_val = pd.DataFrame(y_val_arr, columns=["kwp"])
-
-        val_ds = PVForecastDataset(X_val, y_val, cfg.data)
-        val_loader = build_dataloader(val_ds, batch_size=batch_size, shuffle=False)
-
-        cfg.model.input_size = val_ds.X_values.shape[1]
-        cfg.model.horizon = val_ds.horizon
-
-        model = build_model(cfg.model, device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.eval()
-
-        criterion = torch.nn.MSELoss()
-        mse_scaled = eval_loss(model, val_loader, criterion, device)
-        rmse_scaled = float(np.sqrt(mse_scaled))
-
-        y_true_list = []
-        y_pred_list = []
-        with torch.no_grad():
-            for batch in val_loader:
-                x = batch["x_hist"].to(device)
-                y = batch["y_future"].cpu().numpy()
-                y_hat = model(x).cpu().numpy()
-                y_true_list.append(y)
-                y_pred_list.append(y_hat)
-
-        y_true_scaled = np.concatenate(y_true_list, axis=0)
-        y_pred_scaled = np.concatenate(y_pred_list, axis=0)
-
-        y_true = inverse_scale_y(y_true_scaled, scaler)
-        y_pred = inverse_scale_y(y_pred_scaled, scaler)
-
-        mae, mse_v, rmse_v = compute_metrics(y_true, y_pred)
-
-        # MASE per il fold
-        y_train_scaled_df = pd.read_csv(y_train_path, index_col=0)
-        y_train_scaled_arr = y_train_scaled_df.to_numpy(dtype=float)
-        y_train_real = inverse_scale_y(y_train_scaled_arr, scaler)
-        mase_value = mase(y_true, y_pred, insample=y_train_real, m=24)
-
-        print("Fold metrics (scaled):")
-        print(f"  MSE  (scaled): {mse_scaled:.4f}")
-        print(f"  RMSE (scaled): {rmse_scaled:.4f}")
-        print("Fold metrics (real space, kW/kWp):")
-        print(f"  MAE  (real): {mae:.4f}")
-        print(f"  MSE  (real): {mse_v:.4f}")
-        print(f"  RMSE (real): {rmse_v:.4f}")
-        print(f"  MASE (m=24): {mase_value:.4f}")
-
-        all_mse_scaled.append(mse_scaled)
-        all_rmse_scaled.append(rmse_scaled)
-        all_mae.append(mae)
-        all_mse.append(mse_v)
-        all_rmse.append(rmse_v)
-        all_mase.append(mase_value)
-
-    if not all_mse_scaled:
-        print("\n[ERROR] Nessun fold valido valutato (artifacts mancanti?).")
-        return
-
-    print("\n=== CV – Average metrics over folds ===")
-    print(f"MSE  (scaled) mean: {np.mean(all_mse_scaled):.4f}")
-    print(f"RMSE (scaled) mean: {np.mean(all_rmse_scaled):.4f}")
-    print(f"MAE  (real)   mean: {np.mean(all_mae):.4f}")
-    print(f"MSE  (real)   mean: {np.mean(all_mse):.4f}")
-    print(f"RMSE (real)   mean: {np.mean(all_rmse):.4f}")
-    print(f"MASE (m=24)   mean: {np.mean(all_mase):.4f}")
+__all__ = ["evaluate_test_sheet"]
 
 
-def main():
-    print("=== Evaluate Validation Set ===")
-
+def main() -> None:
     cfg = ExperimentConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if cfg.split.mode == "train_val":
-        evaluate_validation_split(cfg, device)
-    elif cfg.split.mode == "cv":
-        evaluate_cv(cfg, device)
-    else:
-        raise ValueError("cfg.split.mode deve essere 'train_val' oppure 'cv'")
+    evaluate_test_sheet(cfg, device)
 
 
 if __name__ == "__main__":

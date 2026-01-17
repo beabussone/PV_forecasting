@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import torch
+import random
 from torch.utils.data import Dataset, DataLoader
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
@@ -231,11 +232,18 @@ def make_val_with_context(
 # DataLoader helper
 # ============================================================
 
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def build_dataloader(
     dataset: Dataset,
     batch_size: int = 64,
     shuffle: bool = False,
     num_workers: int = 0,
+    seed: Optional[int] = None,
 ) -> DataLoader:
     """
     Costruisce un DataLoader standard.
@@ -243,10 +251,19 @@ def build_dataloader(
     - train: shuffle=True (mescola le finestre)
     - val/test: shuffle=False
     """
+    generator = None
+    worker_init_fn = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+        worker_init_fn = _seed_worker
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        generator=generator,
+        worker_init_fn=worker_init_fn,
     )

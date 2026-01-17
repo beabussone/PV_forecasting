@@ -300,6 +300,10 @@ def process_all_data(
         print(f"[y] Esempio datetime PRIMA: {y[y_time_col].iloc[0]}")
 
     y[y_time_col] = pd.to_datetime(y[y_time_col], errors="coerce")
+    if debug:
+        tzinfo = getattr(y[y_time_col].dt, "tz", None)
+        tz_state = "naive" if tzinfo is None else str(tzinfo)
+        print(f"[y] timezone state: {tz_state} (expected: local +{fixed_offset_hours})")
 
     # Label già in +10 ma naive → localizziamo direttamente a fixed_tz
     if getattr(y[y_time_col].dt, "tz", None) is None:

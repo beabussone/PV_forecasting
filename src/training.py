@@ -131,10 +131,9 @@ def evaluate_metrics(
       - mase (se naive_scale è fornito)
     """
     model.eval()
-    running_loss = 0.0
-    running_rmse = 0.0
-    running_mase = 0.0
-    n_samples = 0
+    sum_sq = 0.0
+    sum_abs = 0.0
+    n_elems = 0
 
     for batch in loader:
         x_hist, y_future = _get_xy_from_batch(batch)
@@ -143,26 +142,17 @@ def evaluate_metrics(
 
         y_hat = model(x_hist)
 
-        loss = loss_fn(y_hat, y_future)
-        rmse = compute_rmse(y_future, y_hat)
+        diff = y_future - y_hat
+        sum_sq += float(torch.sum(diff ** 2).item())
+        sum_abs += float(torch.sum(torch.abs(diff)).item())
+        n_elems += int(y_future.numel())
 
-        if naive_scale is not None:
-            mase = compute_mase(y_future, y_hat, naive_scale)
-        else:
-            mase = float("nan")
-
-        bs = x_hist.size(0)
-        running_loss += loss.item() * bs
-        running_rmse += rmse * bs
-        running_mase += (mase * bs) if naive_scale is not None else 0.0
-        n_samples += bs
-
-    out = {
-        "loss": running_loss / max(n_samples, 1),
-        "rmse": running_rmse / max(n_samples, 1),
-    }
+    mse = sum_sq / max(n_elems, 1)
+    rmse = float(np.sqrt(mse))
+    out = {"loss": float(mse), "rmse": rmse}
     if naive_scale is not None:
-        out["mase"] = running_mase / max(n_samples, 1)
+        mae = sum_abs / max(n_elems, 1)
+        out["mase"] = float(mae / naive_scale) if naive_scale > 0 else float("inf")
     return out
 
 
@@ -194,6 +184,7 @@ def fit(
     y_train_insample: Optional[Union[np.ndarray, torch.Tensor]] = None,
     mase_m: int = 24,
     keep_best_on_val: bool = True,
+    best_metric: str = "loss",
     # modifica per tuning
     early_stopping: bool = False,
     patience: int = 5,
@@ -225,6 +216,7 @@ def fit(
 
     best_state: Optional[Dict[str, torch.Tensor]] = None
     best_val = float("inf")
+    best_metric = str(best_metric).lower()
     # modifica per tuning
     no_improve = 0
 
@@ -242,10 +234,17 @@ def fit(
             val_rmse.append(v_rmse)
             val_mase.append(v_mase)
 
-            # modifica per tuning
-            improved = v_loss < (best_val - min_delta)
+            # selezione del best checkpoint in base alla metrica scelta
+            if best_metric == "mase" and not np.isnan(v_mase):
+                current_metric = v_mase
+            elif best_metric == "rmse":
+                current_metric = v_rmse
+            else:
+                current_metric = v_loss
+
+            improved = current_metric < (best_val - min_delta)
             if improved:
-                best_val = v_loss
+                best_val = current_metric
                 if keep_best_on_val:
                     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 no_improve = 0

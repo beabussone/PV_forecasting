@@ -1,7 +1,7 @@
 # src/config.py
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Literal, Mapping, Tuple
+from typing import Any, Dict, Optional, Literal
 from src.data_module import PVDataConfig
 
 # -----------------------------
@@ -15,8 +15,8 @@ class PathsConfig:
     processed_dir: str = "data/processed"
     artifacts_dir: str = "artifacts"
     # nomi/pattern per artifact salvati (personalizzabili per modelli diversi)
-    model_filename: str = "model_tcn.pth"
-    model_fold_template: str = "model_tcn_fold{fold}.pth"
+    model_filename: str = "model_seq2seq.pth"
+    model_fold_template: str = "model_seq2seq_fold{fold}.pth"
     scaler_filename: str = "scaler.pkl"
     scaler_fold_template: str = "scaler_fold{fold}.pkl"
     X_val_filename: str = "X_val_scaled.npy"
@@ -27,6 +27,7 @@ class PathsConfig:
     y_train_fold_template: str = "y_train_scaled_fold{fold}.csv"
     y_val_out_filename: str = "y_val_scaled.csv"
     y_val_out_fold_template: str = "y_val_scaled_fold{fold}.csv"
+    ohe_vocab_filename: str = "ohe_vocab.pkl"
 
     # salvataggi feature-engineered (opzionali)
     X_train_feat_out: str = "data/processed/X_train_feat.csv"
@@ -40,10 +41,11 @@ class PathsConfig:
 @dataclass
 class SplitConfig:
     # "train_val" semplice oppure "cv"
-    mode: Literal["train_val", "cv"] = "cv"
+    mode: Literal["train_val", "cv", "train_all"] = "train_all"
     train_ratio: float = 0.8  # usato se mode == "train_val"
     val_ratio: float = 0.2    # usato se mode == "train_val"
-    n_splits: int = 4         # usato se mode == "cv"
+    train_all_val_ratio: float = 0.1  # usato se mode == "train_all"
+    n_splits: int = 3         # usato se mode == "cv"
 
 
 # -----------------------------
@@ -65,52 +67,41 @@ class DataloaderConfig:
 @dataclass
 class ModelConfig:
     # Identificatore architettura (usato da build_model e random_search)
-    arch: str = "tcn"   # es: "tcn", "lstm_mlp", ...
+    arch: str = "seq2seq"   # es: "seq2seq"
 
     # Dimensioni (settate nel main via loader/dataset)
     input_size: Optional[int] = None
     horizon: Optional[int] = None
 
     # -----------------
-    # TCN params (legacy)
+    # Seq2Seq params
     # -----------------
-    # modifica per tuning
-    num_channels: Tuple[int, ...] = (64, 64, 64)
-    hidden: int = 64
-    kernel_size: int = 2 # prima era 3
-    n_blocks: int = 3
-    dropout: float = 0.2984182840729522 # 0.2
-
-    # -----------------
-    # LSTM+MLP params
-    # -----------------
-    hidden_size: int = 64
-    num_layers: int = 2
-    bidirectional: bool = False
-    mlp_hidden_size: int = 64
+    seq2seq_hidden_size: int = 128
+    seq2seq_num_layers: int = 2
+    seq2seq_dropout: float = 0.12106924099115703
 
 
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 30
+    epochs: int = 20 
     #lr: float = 1e-3
-    lr: float = 0.0025652733300618224
+    lr: float = 0.00027500609113736063
+    seed: int = 42
+    deterministic: bool = True
     # modifica per tuning
     early_stopping: bool = True
-    patience: int = 5
+    patience: int = 8 # 5
     min_delta: float = 0.0
     loss_plot_path: str = "eda_plots/loss_curve.png"
     pred_vs_true_plot_path: str = "eda_plots/pred_vs_true.png"
 
 
-SearchSpace = Mapping[str, Any]
-
 @dataclass
 class RandomSearchConfig:
-    enabled: bool = True
+    enabled: bool = False
     n_trials: int = 20
-    metric: Literal["loss", "rmse", "mase"] = "loss"
+    metric: Literal["loss", "rmse", "mase"] = "mase"
     mode: Literal["min", "max"] = "min"
     seed: int = 42
     # se vuoi silenziare il log per ogni trial
@@ -119,17 +110,13 @@ class RandomSearchConfig:
     # spazio di ricerca agnostico (path -> spec)
     # NB: tuple ok (es. num_channels)
     search_space: Dict[str, Any] = field(default_factory=lambda: {
-        "model.num_channels": [
-            (16, 16),
-            (32, 32),
-            (32, 32, 32),
-            (64, 64, 64),
-        ],
-        "model.kernel_size": {"type": "int", "low": 2, "high": 5},
-        "model.dropout": {"type": "float", "low": 0.05, "high": 0.5},
-        "training.lr": {"type": "logfloat", "low": 1e-4, "high": 5e-3},
-        # opzionale: fai cercare anche epochs (ma occhio ai tempi)
-        # "training.epochs": {"type":"int","low":5,"high":30},
+        "seq2seq": {
+            "model.seq2seq_hidden_size": {"type": "int", "low": 96, "high": 128, "step": 16},
+            "model.seq2seq_num_layers": {"type": "int", "low": 1, "high": 2},
+            "model.seq2seq_dropout": {"type": "float", "low": 0.0, "high": 0.15},
+            "training.lr": {"type": "logfloat", "low": 1e-4, "high": 4e-4},
+            "training.epochs": {"type": "int", "low": 10, "high": 30},
+        },
     })
 
 
@@ -142,6 +129,16 @@ class BaselineConfig:
     enabled: bool = True
     ridge_alpha: float = 1.0
     mase_seasonal_m: int = 24
+
+
+@dataclass
+class TestConfig:
+    enabled: bool = True
+    sheet_name: str = "07-12--06-13"
+
+
+
+
 
 
 # -----------------------------
@@ -166,29 +163,17 @@ class ExperimentConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     random_search: RandomSearchConfig = field(default_factory=RandomSearchConfig)
+    test: TestConfig = field(default_factory=TestConfig)
 
     # Search space agnostico: puoi aggiungere nuove arch in futuro
     hyperparam_search: Dict[str, Any] = field(
         default_factory=lambda: {
-            "tcn": {
-                # modifica per tuning
-                "model.num_channels": [
-                    (16, 16),
-                    (32, 32),
-                    (32, 32, 32),
-                    (64, 64, 64),
-                ],
-                "model.dropout": {"type": "float", "low": 0.0, "high": 0.5},
-                "training.lr": {"type": "logfloat", "low": 1e-4, "high": 3e-3},
-                "training.epochs": {"type": "int", "low": 5, "high": 30},
-            },
-            "lstm_mlp": {
-                "model.hidden_size": {"type": "int", "low": 32, "high": 256, "step": 32},
-                "model.num_layers": {"type": "int", "low": 1, "high": 4},
-                "model.dropout": {"type": "float", "low": 0.0, "high": 0.6},
-                "model.mlp_hidden_size": {"type": "int", "low": 32, "high": 256, "step": 32},
-                "training.lr": {"type": "logfloat", "low": 1e-4, "high": 3e-3},
-                "training.epochs": {"type": "int", "low": 5, "high": 30},
+            "seq2seq": {
+                "model.seq2seq_hidden_size": {"type": "int", "low": 96, "high": 128, "step": 16},
+                "model.seq2seq_num_layers": {"type": "int", "low": 1, "high": 2},
+                "model.seq2seq_dropout": {"type": "float", "low": 0.0, "high": 0.15},
+                "training.lr": {"type": "logfloat", "low": 1e-4, "high": 4e-4},
+                "training.epochs": {"type": "int", "low": 10, "high": 30},
             },
         }
     )

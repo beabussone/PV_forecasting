@@ -1,8 +1,9 @@
 import pandas as pd
 from pathlib import Path
 
-WX_SHEETS = ["07-10--06-11", "07-11--06-12"]
-PV_SHEETS = ["07-10--06-11", "07-11--06-12"]
+WX_TRAIN_SHEETS = ["07-10--06-11", "07-11--06-12"]
+PV_TRAIN_SHEETS = ["07-10--06-11", "07-11--06-12"]
+TEST_SHEET = "07-12--06-13"
 
 
 def _read_excel_sheets(path: Path, sheets):
@@ -19,7 +20,7 @@ def _read_excel_sheets(path: Path, sheets):
         ) from exc
 
 
-def load_wx(wx_path: str, sheets=WX_SHEETS) -> pd.DataFrame:
+def load_wx(wx_path: str, sheets=WX_TRAIN_SHEETS) -> pd.DataFrame:
     """Carica e concatena i fogli meteo (wx_dataset)."""
     path = Path(wx_path)
     dfs = _read_excel_sheets(path, sheets)
@@ -27,7 +28,7 @@ def load_wx(wx_path: str, sheets=WX_SHEETS) -> pd.DataFrame:
     return X
 
 
-def load_pv(pv_path: str, sheets=PV_SHEETS) -> pd.DataFrame:
+def load_pv(pv_path: str, sheets=PV_TRAIN_SHEETS) -> pd.DataFrame:
     """
     Carica e concatena i fogli PV (pv_dataset).
     Prima colonna = datetime, seconda = kwp (label).
@@ -45,4 +46,15 @@ def load_datasets(wx_path: str, pv_path: str):
     """Wrapper unico richiamato dal main."""
     X = load_wx(wx_path)
     y = load_pv(pv_path)
+    return X, y
+
+
+def load_test_datasets(
+    wx_path: str,
+    pv_path: str,
+    sheet_name: str = TEST_SHEET,
+):
+    """Carica il foglio test (wx + pv)."""
+    X = load_wx(wx_path, sheets=[sheet_name])
+    y = load_pv(pv_path, sheets=[sheet_name])
     return X, y

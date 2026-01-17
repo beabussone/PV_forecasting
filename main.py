@@ -21,11 +21,6 @@ from src.feature_engineering import (
     save_feature_engineered_X,
 )
 
-from src.models import build_model                 # deve costruire TCN da cfg.model
-# modifica per tuning
-from src.training import fit, evaluate_loss        # dal tuo training.py unificato
-from src.hyperparameter_search import random_search, _set_by_path  # se random search abilitato
-
 from src.data_module import (
     temporal_train_val_split,
     temporal_cv_splits_train_val,
@@ -43,6 +38,24 @@ def main():
     # Config globale dell’esperimento
     # -----------------------------
     cfg = ExperimentConfig()
+    seed_base = int(getattr(cfg.training, "seed", 42))
+    deterministic = bool(getattr(cfg.training, "deterministic", True))
+
+    def _set_seed(seed: int, deterministic_flag: bool) -> None:
+        import random as _random
+        import numpy as _np
+        import torch as _torch
+
+        _random.seed(seed)
+        _np.random.seed(seed)
+        _torch.manual_seed(seed)
+        if _torch.cuda.is_available():
+            _torch.cuda.manual_seed_all(seed)
+        if deterministic_flag:
+            _torch.backends.cudnn.deterministic = True
+            _torch.backends.cudnn.benchmark = False
+
+    _set_seed(seed_base, deterministic)
 
     # 1) Caricamento dataset
     X_raw, y_raw = load_datasets(
@@ -58,6 +71,10 @@ def main():
     # 2) EDA + analisi con la label (solo stampe / info, niente modifiche)
     run_basic_eda(X_raw, y_raw)
     analyze_feature_label_correlations(X_raw, y_raw, label_col="kwp")
+
+    # mi assicuro che esista la cartella per gli artifacts (modelli, scaler, ecc.)
+    os.makedirs(cfg.paths.artifacts_dir, exist_ok=True)
+    os.makedirs(cfg.paths.processed_dir, exist_ok=True)
 
     # 3) Preprocessing deterministico: missing, timezone+cyc, allineamento, float32.
     #    Qui non si fa alcun fit, così i passi successivi lavorano su dati puliti ma non “sbilanciati”.
@@ -119,8 +136,31 @@ def main():
                     "y_val": y_val_raw,
                 }
             )
+    elif mode == "train_all":
+        train_all_val_ratio = float(getattr(cfg.split, "train_all_val_ratio", 0.0))
+        if train_all_val_ratio > 0.0:
+            split = temporal_train_val_split(
+                X_base,
+                y_base,
+                train_ratio=1.0 - train_all_val_ratio,
+                val_ratio=train_all_val_ratio,
+            )
+            X_train_raw, X_val_raw, y_train_raw, y_val_raw = split
+        else:
+            X_train_raw, y_train_raw = X_base, y_base
+            X_val_raw, y_val_raw = X_base.iloc[:0], y_base.iloc[:0]
+
+        folds_raw.append(
+            {
+                "fold": 0,
+                "X_train": X_train_raw,
+                "X_val": X_val_raw,
+                "y_train": y_train_raw,
+                "y_val": y_val_raw,
+            }
+        )
     else:
-        raise ValueError("cfg.split.mode deve essere 'train_val' oppure 'cv'")
+        raise ValueError("cfg.split.mode deve essere 'train_val', 'cv' oppure 'train_all'")
 
     # ------------------------------------------------------
     # 5–7) OHE, FE e scaling per fold
@@ -163,10 +203,6 @@ def main():
             }
         )
 
-    # mi assicuro che esista la cartella per gli artifacts (modelli, scaler, ecc.)
-    os.makedirs(cfg.paths.artifacts_dir, exist_ok=True)
-    os.makedirs(cfg.paths.processed_dir, exist_ok=True)
-
     # ------------------------------------------------------
     # 8) Salvataggi / dataloader per train_val o CV
     # ------------------------------------------------------
@@ -177,6 +213,11 @@ def main():
         scaler_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.scaler_filename)
         with open(scaler_path, "wb") as f:
             pickle.dump(p["scaler"], f)
+
+        vocab_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.ohe_vocab_filename)
+        with open(vocab_path, "wb") as f:
+            pickle.dump(vocab, f)
+
 
         np.save(
             os.path.join(cfg.paths.artifacts_dir, cfg.paths.X_val_filename),
@@ -215,7 +256,11 @@ def main():
         )
 
         train_loader = build_dataloader(
-            train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            seed=seed_base,
         )
 
         ### Modifica per tuning ###
@@ -226,7 +271,11 @@ def main():
         ### fine modifica ###
 
         val_loader = build_dataloader(
-            val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            seed=seed_base + 1,
         )
 
 
@@ -246,6 +295,70 @@ def main():
             f"[LOADER] train batches: {len(train_loader)}, "
             f"val batches: {len(val_loader)}"
         )
+
+        loaders = {"train_loader": train_loader, "val_loader": val_loader}
+
+    elif mode == "train_all":
+        p = folds_processed[0]
+
+        scaler_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.scaler_filename)
+        with open(scaler_path, "wb") as f:
+            pickle.dump(p["scaler"], f)
+
+        vocab_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.ohe_vocab_filename)
+        with open(vocab_path, "wb") as f:
+            pickle.dump(vocab, f)
+
+        p["y_train"].to_csv(
+            os.path.join(cfg.paths.processed_dir, cfg.paths.y_train_filename)
+        )
+
+        train_ds = PVForecastDataset(p["X_train"], p["y_train"], data_config)
+        train_loader = build_dataloader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            seed=seed_base,
+        )
+
+        val_loader = None
+        if not p["X_val"].empty:
+            X_val_ctx, y_val_ctx, min_start = make_val_with_context(
+                p["X_train"],
+                p["y_train"],
+                p["X_val"],
+                p["y_val"],
+                history=data_config.history_hours,
+            )
+
+            val_ds = PVForecastDataset(
+                X_val_ctx,
+                y_val_ctx,
+                data_config,
+                min_start_idx=min_start,
+            )
+
+            val_loader = build_dataloader(
+                val_ds,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                seed=seed_base + 1,
+            )
+
+            np.save(
+                os.path.join(cfg.paths.artifacts_dir, cfg.paths.X_val_filename),
+                p["X_val"].to_numpy(dtype="float32"),
+            )
+            np.save(
+                os.path.join(cfg.paths.artifacts_dir, cfg.paths.y_val_filename),
+                p["y_val"].to_numpy(dtype="float32"),
+            )
+
+        sample = next(iter(train_loader))
+        cfg.model.input_size = int(sample["x_hist"].shape[-1])
+        cfg.model.horizon = int(cfg.data.horizon_hours)
 
         loaders = {"train_loader": train_loader, "val_loader": val_loader}
 
@@ -313,19 +426,25 @@ def main():
                 min_start_idx=min_start,  # <-- solo se hai min_start_idx nel Dataset
             )
 
+            fold_seed = seed_base + int(fold_id) * 100
             train_loader = build_dataloader(
-                train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+                train_ds,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                seed=fold_seed,
             )
             val_loader = build_dataloader(
-                val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+                val_ds,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                seed=fold_seed + 1,
             )
 
-            ### Modifica per tuning ###
             sample = next(iter(train_loader))
             cfg.model.input_size = int(sample["x_hist"].shape[-1])
             cfg.model.horizon = int(cfg.data.horizon_hours)
-
-            ### fine modifica ###
 
             cv_loaders.append(
                 {
@@ -369,7 +488,8 @@ def main():
         compute_rmse,
         compute_mase,
     )
-    from src.hyperparameter_search import random_search, _set_by_path  # se random search abilitato
+    from evaluate import evaluate_test_sheet
+    from src.hyperparameter_search import random_search_cv, _set_by_path  # se random search abilitato
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[DEVICE] {device}")
@@ -400,45 +520,33 @@ def main():
             return None
         return compute_naive_scale_from_series(series, m=m)
 
+    def _reset_loader_seed(loader, seed: int) -> None:
+        if loader is None:
+            return
+        generator = getattr(loader, "generator", None)
+        if generator is not None:
+            try:
+                generator.manual_seed(int(seed))
+            except Exception:
+                pass
+
     # helper: set input_size/horizon DAL BATCH (evita 32 vs 33 quando include_past_target=True)
     def _sync_dims_from_loader(train_loader):
         sample = next(iter(train_loader))
         cfg.model.input_size = int(sample["x_hist"].shape[-1])
         cfg.model.horizon = int(cfg.data.horizon_hours)
 
-    # helper: esegue (opzionale) random search + fit finale
-    def _train_with_optional_random_search(train_loader, val_loader):
+    # helper: fit finale
+    def _train_with_optional_random_search(train_loader, val_loader, *, seed_override: int | None = None):
         # 1) sync dims (sempre)
         _sync_dims_from_loader(train_loader)
 
-        best_params = None
+        if seed_override is not None:
+            _set_seed(int(seed_override), deterministic)
+            _reset_loader_seed(train_loader, int(seed_override))
+            _reset_loader_seed(val_loader, int(seed_override) + 1)
 
-        # 2) random search (se presente in cfg)
-        rs_cfg = getattr(cfg, "random_search", None)
-        if rs_cfg is not None and getattr(rs_cfg, "enabled", False):
-            rs = random_search(
-                model_builder=lambda model_cfg: build_model(model_cfg, device=None),
-                train_loader=train_loader,
-                val_loader=val_loader,
-                cfg=cfg,
-                search_space=getattr(rs_cfg, "search_space", None),
-                n_trials=int(getattr(rs_cfg, "n_trials", 20)),
-                metric=str(getattr(rs_cfg, "metric", "loss")),
-                mode=str(getattr(rs_cfg, "mode", "min")),
-                seed=int(getattr(rs_cfg, "seed", 42)),
-                device=device,
-                verbose=bool(getattr(rs_cfg, "verbose", True)),
-            )
-            best_params = rs.best_params
-
-            # applico i best params al cfg "vero"
-            for k, v in best_params.items():
-                _set_by_path(cfg, k, v)
-
-            # re-sync dims (in caso random search abbia toccato qualcosa)
-            _sync_dims_from_loader(train_loader)
-
-        # 3) build model finale + fit finale
+        # 2) build model finale + fit finale
         model = build_model(cfg.model, device=None)
 
         # y insample per MASE (nello stesso spazio della loss: scaled)
@@ -455,6 +563,7 @@ def main():
             y_train_insample=y_train_insample,
             mase_m=int(getattr(cfg.baseline, "mase_seasonal_m", 24)),
             keep_best_on_val=True,
+            best_metric=str(getattr(getattr(cfg, "random_search", None), "metric", "loss")),
             # modifica per tuning
             early_stopping=bool(getattr(cfg.training, "early_stopping", False)),
             patience=int(getattr(cfg.training, "patience", 5)),
@@ -462,7 +571,7 @@ def main():
             verbose=True,
         )
 
-        return fit_result, best_params
+        return fit_result
 
 
     if mode == "train_val":
@@ -470,7 +579,11 @@ def main():
         train_loader = loaders["train_loader"]
         val_loader = loaders["val_loader"]
 
-        fit_result, best_params = _train_with_optional_random_search(train_loader, val_loader)
+        fit_result = _train_with_optional_random_search(
+            train_loader,
+            val_loader,
+            seed_override=seed_base,
+        )
 
         # modifica per tuning
         p = folds_processed[0]
@@ -481,7 +594,6 @@ def main():
         metrics_scaled = evaluate_metrics(
             fit_result.model, val_loader, device, nn.MSELoss(), naive_scale=naive_scale_scaled
         )
-
         y_true_scaled, y_pred_scaled = predict_over_loader(fit_result.model, val_loader, device)
         y_true_unscaled = _inverse_scale_y(y_true_scaled, p["scaler"])
         y_pred_unscaled = _inverse_scale_y(y_pred_scaled, p["scaler"])
@@ -505,19 +617,74 @@ def main():
         torch.save(fit_result.model.state_dict(), model_path)
         print(f"[SAVE] modello salvato in {model_path}")
 
-        if best_params:
-            print("[RANDOM_SEARCH] best_params:", best_params)
+        if getattr(cfg, "test", None) and cfg.test.enabled:
+            evaluate_test_sheet(cfg, device)
+
+    elif mode == "train_all":
+        train_loader = loaders["train_loader"]
+        val_loader = loaders["val_loader"]
+
+        _sync_dims_from_loader(train_loader)
+        model = build_model(cfg.model, device=None)
+        y_train_insample = getattr(getattr(train_loader, "dataset", None), "y_values", None)
+
+        fit_result = fit(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=int(cfg.training.epochs),
+            lr=float(cfg.training.lr),
+            device=device,
+            loss_fn=nn.MSELoss(),
+            y_train_insample=y_train_insample,
+            mase_m=int(getattr(cfg.baseline, "mase_seasonal_m", 24)),
+            keep_best_on_val=val_loader is not None,
+            best_metric=str(getattr(getattr(cfg, "random_search", None), "metric", "loss")),
+            early_stopping=bool(getattr(cfg.training, "early_stopping", False)) if val_loader is not None else False,
+            patience=int(getattr(cfg.training, "patience", 5)),
+            min_delta=float(getattr(cfg.training, "min_delta", 0.0)),
+            verbose=True,
+        )
+
+        model_path = os.path.join(cfg.paths.artifacts_dir, cfg.paths.model_filename)
+        torch.save(fit_result.model.state_dict(), model_path)
+        print(f"[SAVE] modello salvato in {model_path}")
+
+        if getattr(cfg, "test", None) and cfg.test.enabled:
+            evaluate_test_sheet(cfg, device)
 
     else:
         # ---- CV ----
+        best_params_cv = None
+        rs_cfg = getattr(cfg, "random_search", None)
+        if rs_cfg is not None and getattr(rs_cfg, "enabled", False):
+            rs = random_search_cv(
+                model_builder=lambda model_cfg: build_model(model_cfg, device=None),
+                fold_loaders=loaders,
+                cfg=cfg,
+                search_space=getattr(rs_cfg, "search_space", None),
+                n_trials=int(getattr(rs_cfg, "n_trials", 20)),
+                metric=str(getattr(rs_cfg, "metric", "loss")),
+                mode=str(getattr(rs_cfg, "mode", "min")),
+                seed=int(getattr(rs_cfg, "seed", 42)),
+                deterministic=bool(getattr(cfg.training, "deterministic", True)),
+                device=device,
+                verbose=bool(getattr(rs_cfg, "verbose", True)),
+            )
+            best_params_cv = rs.best_params
+            for k, v in best_params_cv.items():
+                _set_by_path(cfg, k, v)
+
         val_scores = []
+        val_mase_scores = []
         for fold_data, p in zip(loaders, folds_processed):
             fold_id = fold_data["fold"]
             print(f"=== Training fold {fold_id} ===")
 
-            fit_result, best_params = _train_with_optional_random_search(
+            fit_result = _train_with_optional_random_search(
                 fold_data["train_loader"],
                 fold_data["val_loader"],
+                seed_override=seed_base + int(fold_id) * 100,
             )
 
             # modifica per tuning
@@ -532,7 +699,6 @@ def main():
                 nn.MSELoss(),
                 naive_scale=naive_scale_scaled,
             )
-
             y_true_scaled, y_pred_scaled = predict_over_loader(
                 fit_result.model, fold_data["val_loader"], device
             )
@@ -545,6 +711,8 @@ def main():
             metrics_unscaled = _compute_metrics_np(y_true_unscaled, y_pred_unscaled, naive_scale_unscaled)
 
             val_scores.append(metrics_scaled["loss"])
+            if "mase" in metrics_scaled:
+                val_mase_scores.append(metrics_scaled["mase"])
             print(
                 f"[METRICS][fold {fold_id}] Val MSE (scaled): {metrics_scaled['loss']:.4f} | "
                 f"Val MASE (scaled): {metrics_scaled['mase']:.4f}"
@@ -561,13 +729,19 @@ def main():
             torch.save(fit_result.model.state_dict(), model_path)
             print(f"[SAVE][fold {fold_id}] modello salvato in {model_path}")
 
-            if best_params:
-                print(f"[RANDOM_SEARCH][fold {fold_id}] best_params:", best_params)
-
         if val_scores:
             val_mean = float(np.mean(val_scores))
             val_std = float(np.std(val_scores))
             print(f"[CV][VAL] mean MSE: {val_mean:.4f} | std: {val_std:.4f}")
+        if val_mase_scores:
+            val_mase_mean = float(np.mean(val_mase_scores))
+            val_mase_std = float(np.std(val_mase_scores))
+            print(f"[CV][VAL] mean MASE: {val_mase_mean:.4f} | std: {val_mase_std:.4f}")
+
+        if best_params_cv:
+            print("[RANDOM_SEARCH][CV] best_params:", best_params_cv)
+
+
 
 
 if __name__ == "__main__":
