@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import timezone, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Union
 
 # --- 1. Funzioni semplici: missing --- #
 
@@ -45,6 +45,8 @@ def drop_site_coords(X: pd.DataFrame) -> pd.DataFrame:
 # --- 2. Funzioni OHE train/transform --- #
 
 def _replace_rare_weather(X: pd.DataFrame, rare_list: List[str]) -> pd.DataFrame:
+    """Sostituisce le occorrenze rare di weather_description con "other".
+    """
     X = X.copy()
     if "weather_description" in X.columns:
         X["weather_description"] = X["weather_description"].replace(rare_list, "other")
@@ -93,17 +95,6 @@ def transform_ohe_with_vocab(
     X = X.reindex(columns=dummy_columns, fill_value=0)
     return X
 
-
-# --- 3. Funzioni di scaling --- #
-
-import numpy as np
-import pandas as pd
-from typing import Dict, Union
-
-
-# ===============================================================
-# FIT SCALER (solo su TRAIN)
-# ===============================================================
 def fit_scaler_on_train(
     X_train: pd.DataFrame,
     y_train: Union[pd.Series, np.ndarray, list],
@@ -155,10 +146,6 @@ def fit_scaler_on_train(
 
     return scaler
 
-
-# ===============================================================
-# APPLY SCALER (usa params del train, vale per val/test)
-# ===============================================================
 def apply_scaler(
     X_or_y: Union[pd.DataFrame, pd.Series, np.ndarray],
     scaler: Dict,
@@ -181,9 +168,6 @@ def apply_scaler(
 
     mode = scaler["mode"]
 
-    # ================================================================
-    # 1) Scaling della y
-    # ================================================================
     if is_target:
         y_arr = np.asarray(X_or_y, dtype=np.float32)
         stats = scaler["y_stats"]
@@ -212,9 +196,6 @@ def apply_scaler(
             # se era array, lasciamo array
             return y_arr
 
-    # ================================================================
-    # 2) Scaling di X
-    # ================================================================
     X_scaled = X_or_y.copy()
     X_stats = scaler["X_stats"]
 

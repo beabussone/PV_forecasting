@@ -3,11 +3,6 @@ import pandas as pd
 from numpy import sin, cos, tan, radians, degrees
 from pathlib import Path
 
-
-# ============================================================
-# 1.  Solar geometry component building blocks
-# ============================================================
-
 def solar_declination(day_of_year: int) -> float:
     """
     Declinazione solare in gradi.
@@ -15,14 +10,12 @@ def solar_declination(day_of_year: int) -> float:
     """
     return 23.45 * sin(radians(360 * (284 + day_of_year) / 365))
 
-
 def hour_angle(local_solar_time_hours: float) -> float:
     """
     Hour Angle H in gradi.
     0° = mezzogiorno solare, negativo al mattino, positivo al pomeriggio.
     """
     return 15 * (local_solar_time_hours - 12)
-
 
 def solar_elevation_angle(lat: float, dec: float, hra: float) -> float:
     """
@@ -32,7 +25,6 @@ def solar_elevation_angle(lat: float, dec: float, hra: float) -> float:
         sin(radians(lat)) * sin(radians(dec)) +
         cos(radians(lat)) * cos(radians(dec)) * cos(radians(hra))
     ))
-
 
 def solar_azimuth_angle(lat: float, dec: float, hra: float) -> float:
     """
@@ -44,7 +36,6 @@ def solar_azimuth_angle(lat: float, dec: float, hra: float) -> float:
         cos(radians(hra)) * sin(radians(lat)) - tan(radians(dec)) * cos(radians(lat))
     ))
     return (az + 360) % 360   # normalizzato in [0, 360]
-
 
 def extraterrestrial_irradiance(day_of_year: int, lat: float, dec: float, hra: float):
     """
@@ -61,11 +52,6 @@ def extraterrestrial_irradiance(day_of_year: int, lat: float, dec: float, hra: f
 
     # la componente negativa non ha significato fisico
     return I_sc * E_c * np.maximum(cos_theta, 0)
-
-
-# ============================================================
-# 2. Feature engineering alto livello
-# ============================================================
 
 def add_solar_features(
     df: pd.DataFrame,
@@ -156,10 +142,6 @@ def add_solar_features(
 
     return df
 
-# ============================================================
-# 3. Alternative-to-POA physically-based features
-# ============================================================
-
 def add_effective_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggiunge 3 feature fisiche che NON richiedono tilt:
@@ -188,27 +170,21 @@ def add_effective_features(df: pd.DataFrame) -> pd.DataFrame:
     # conversione in radianti
     zenith_rad = np.radians(zenith_deg)
 
-    # =====================================================
     # 1) effective irradiance (senza tilt)
-    # =====================================================
     # proiezione della componente diretta + componente diffusa
     eff = dni * np.cos(zenith_rad) + dhi
     eff = np.clip(eff, 0, None)  # niente valori negativi
 
     df["effective_irradiance"] = eff.astype("float32")
 
-    # =====================================================
     # 2) direct fraction
-    # =====================================================
     with np.errstate(divide="ignore", invalid="ignore"):
         direct_frac = dni / (dni + dhi)
     direct_frac = np.nan_to_num(direct_frac, nan=0.0, posinf=1.0, neginf=0.0)
 
     df["direct_fraction"] = direct_frac.astype("float32")
 
-    # =====================================================
     # 3) clear-sky index (semplificato)
-    # =====================================================
     # modello semplice per GHI_clear:
     # GHI_clear = ghi_potenziale = k * cos(zenith)
     # dove k = irradiance extraterrestre media ≈ 1367*(1+0.033 cos(...)) ~ 1000 W/m² scalati
@@ -224,8 +200,6 @@ def add_effective_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
-
 def save_feature_engineered_X(X_feat: pd.DataFrame, out_path: str = "data/processed/X_feat.csv"):
     """
     Salva il dataframe X_feat in un percorso specificato.
@@ -236,9 +210,6 @@ def save_feature_engineered_X(X_feat: pd.DataFrame, out_path: str = "data/proces
 
     X_feat.to_csv(out, index=True)
     print(f"[SAVE] X_feat -> {out}")
-
-
-
 
 def compute_sun_times(df, lat):
     """
@@ -311,7 +282,6 @@ def compute_sun_times(df, lat):
 
     return sunrise_times, sunset_times
 
-
 def add_solar_time_features(df: pd.DataFrame, lat: float) -> pd.DataFrame:
     """
     Aggiunge:
@@ -343,7 +313,6 @@ def add_solar_time_features(df: pd.DataFrame, lat: float) -> pd.DataFrame:
     df["minutes_until_sunset"]  = df["minutes_until_sunset"].clip(lower=0)
 
     return df
-
 
 def add_cloud_effect(df: pd.DataFrame) -> pd.DataFrame:
     """

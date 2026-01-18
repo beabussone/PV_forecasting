@@ -1,15 +1,13 @@
-# src/config.py
-
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Literal
 from src.data_module import PVDataConfig
 
-# -----------------------------
-# Path dei file
-# -----------------------------
-
 @dataclass
 class PathsConfig:
+    '''
+    Config dei path usati nell’esperimento.
+    Modifica questi valori se la struttura delle cartelle cambia.
+    '''
     wx_path: str = "data/wx_dataset.xlsx"
     pv_path: str = "data/pv_dataset.xlsx"
     processed_dir: str = "data/processed"
@@ -33,40 +31,34 @@ class PathsConfig:
     X_train_feat_out: str = "data/processed/X_train_feat.csv"
     X_val_feat_out: str = "data/processed/X_val_feat.csv"
 
-
-# -----------------------------
-# Config dello split
-# -----------------------------
-
 @dataclass
 class SplitConfig:
-    # "train_val" semplice oppure "cv"
+    '''Config dello split dei dati.
+    mode:
+      - "train_val": split train/val con ratio specificati
+      - "cv": cross-validation K-fold
+      - "train_all": usa tutti i dati per il training, con una piccola parte per la val
+    '''
     mode: Literal["train_val", "cv", "train_all"] = "train_all"
     train_ratio: float = 0.8  # usato se mode == "train_val"
     val_ratio: float = 0.2    # usato se mode == "train_val"
     train_all_val_ratio: float = 0.1  # usato se mode == "train_all"
     n_splits: int = 3         # usato se mode == "cv"
 
-
-# -----------------------------
-# Config dei DataLoader + scaling
-# -----------------------------
-
 @dataclass
 class DataloaderConfig:
+    '''
+    Config dei DataLoader e del preprocessing.
+    '''
     batch_size: int = 64
     num_workers: int = 0
     scaling_mode: str = "standard"  # usato dalla pipeline di preprocessing/scaling
 
-
-# -----------------------------
-# Config del modello e del training
-# -----------------------------
-
-### PRIMA MODIFICA PER TUNING ###
 @dataclass
 class ModelConfig:
-    # Identificatore architettura (usato da build_model e random_search)
+    '''Config del modello.
+    arch: architettura del modello da usare.
+    '''
     arch: str = "seq2seq"   # es: "seq2seq"
 
     # Dimensioni (settate nel main via loader/dataset)
@@ -80,12 +72,11 @@ class ModelConfig:
     seq2seq_num_layers: int = 2
     seq2seq_dropout: float = 0.12106924099115703
 
-
-
 @dataclass
 class TrainingConfig:
-    epochs: int = 20 
-    #lr: float = 1e-3
+    '''Config del training.
+    '''
+    epochs: int = 20
     lr: float = 0.00027500609113736063
     seed: int = 42
     deterministic: bool = True
@@ -96,9 +87,10 @@ class TrainingConfig:
     loss_plot_path: str = "eda_plots/loss_curve.png"
     pred_vs_true_plot_path: str = "eda_plots/pred_vs_true.png"
 
-
 @dataclass
 class RandomSearchConfig:
+    '''Config per la ricerca randomizzata degli iperparametri.
+    '''
     enabled: bool = False
     n_trials: int = 20
     metric: Literal["loss", "rmse", "mase"] = "mase"
@@ -119,34 +111,27 @@ class RandomSearchConfig:
         },
     })
 
-
-# -----------------------------
-# Config baseline ML
-# -----------------------------
-
 @dataclass
 class BaselineConfig:
+    '''Config per il modello baseline.
+'''
     enabled: bool = True
     ridge_alpha: float = 1.0
     mase_seasonal_m: int = 24
 
-
 @dataclass
 class TestConfig:
+    '''Config per il test finale e il salvataggio dei risultati.
+    '''
     enabled: bool = True
     sheet_name: str = "07-12--06-13"
 
-
-
-
-
-
-# -----------------------------
-# Config "alto livello" di tutto l’esperimento
-# -----------------------------
-
 @dataclass
 class ExperimentConfig:
+    '''
+    Config "alto livello" di tutto l’esperimento.
+    Contiene tutte le sotto-config necessarie.
+    '''
     paths: PathsConfig = field(default_factory=PathsConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
     data: PVDataConfig = field(
@@ -154,7 +139,6 @@ class ExperimentConfig:
             history_hours=72,
             horizon_hours=24,
             stride=1,
-            include_future_covariates=False,
             include_past_target=True,
         )
     )

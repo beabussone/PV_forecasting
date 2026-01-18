@@ -1,19 +1,26 @@
-# src/models.py
 from __future__ import annotations
-
 import torch
 from torch import nn
 from typing import Optional
-
-
-# ============================================================
-# Encoder-Decoder LSTM (seq2seq)
-# ============================================================
 
 class Seq2SeqLSTM(nn.Module):
     """
     Input:  x_hist [B, T, F]
     Output: y_hat  [B, horizon]
+    Seq2Seq LSTM per previsione multi-step.
+    Usa un encoder LSTM per codificare la storia e un decoder LSTM
+    per generare le previsioni passo-passo.
+    Args:
+    - input_size: numero di feature in input (F)
+    - horizon: numero di step futuri da prevedere
+    - hidden_size: dimensione degli hidden state LSTM
+    - num_layers: numero di layer LSTM
+    - dropout: dropout tra i layer LSTM (se num_layers > 1)
+    ------------------------------------------------------------
+    Forward:
+    - x_hist: tensor [B, T, F] delle feature storiche
+    Returns:
+    - y_hat: tensor [B, horizon] delle previsioni future    
     """
     def __init__(
         self,
@@ -60,10 +67,6 @@ class Seq2SeqLSTM(nn.Module):
             dec_input = y_step.detach()
 
         return torch.cat(preds, dim=1)  # [B, H]
-
-
-# Model builder (agnostico per random search)
-# ============================================================
 
 def build_model(model_cfg, device: Optional[torch.device] = None) -> nn.Module:
     """

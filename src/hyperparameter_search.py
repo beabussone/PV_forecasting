@@ -1,29 +1,22 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
-
 import copy
 import math
 import random
-
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-
 from src.training import fit
-
-
-# ============================================================
-# Random search utilities
-# ============================================================
 
 SearchSpace = Mapping[str, Any]
 
 
 @dataclass
 class TrialResult:
+    '''Funzione di utilità per memorizzare i risultati di un singolo trial di random search.
+    '''
     params: Dict[str, Any]
     score: float
     metrics: Dict[str, float]
@@ -32,6 +25,8 @@ class TrialResult:
 
 @dataclass
 class RandomSearchResult:
+    '''Funzione di utilità per memorizzare i risultati complessivi della random search.
+    '''
     best_params: Dict[str, Any]
     best_score: float
     best_metrics: Dict[str, float]
@@ -39,6 +34,9 @@ class RandomSearchResult:
 
 
 def _get_model_key(cfg: Any, model_builder: Optional[Callable[..., nn.Module]] = None) -> str:
+    '''
+    Estrae la chiave del modello dalla configurazione o dal costruttore del modello.
+    '''
     model_cfg = getattr(cfg, "model", None)
     for attr in ("model_type", "model_name", "name", "kind", "arch"):
         if model_cfg is not None and hasattr(model_cfg, attr):
@@ -51,6 +49,9 @@ def _get_model_key(cfg: Any, model_builder: Optional[Callable[..., nn.Module]] =
 
 
 def _resolve_search_space(cfg: Any, model_key: str, override: Optional[SearchSpace]) -> SearchSpace:
+    '''
+    Risolve lo spazio di ricerca per un dato modello, tenendo conto di eventuali sovrascritture.
+    '''
     if override is not None:
         if isinstance(override, Mapping):
             if model_key in override:
@@ -90,6 +91,9 @@ def _resolve_search_space(cfg: Any, model_key: str, override: Optional[SearchSpa
 
 
 def _set_by_path(obj: Any, path: str, value: Any) -> None:
+    '''
+    Imposta un valore in un oggetto annidato utilizzando un percorso specificato.
+    '''
     parts = path.split(".")
     target = obj
     for part in parts[:-1]:
@@ -106,6 +110,9 @@ def _set_by_path(obj: Any, path: str, value: Any) -> None:
 
 
 def _sample_choice(rng: random.Random, values: Iterable[Any]) -> Any:
+    '''
+    Campiona un valore casuale da un insieme di valori.
+    '''
     values_list = list(values)
     if not values_list:
         raise ValueError("Choice space is empty.")
@@ -113,6 +120,9 @@ def _sample_choice(rng: random.Random, values: Iterable[Any]) -> Any:
 
 
 def _sample_from_spec(rng: random.Random, spec: Any) -> Any:
+    '''
+    Campiona un valore casuale da una specifica.
+    '''
     if isinstance(spec, Mapping):
         spec_type = str(spec.get("type", "choice"))
         if spec_type == "choice":
@@ -251,6 +261,9 @@ def random_search_cv(
     device: Optional[torch.device] = None,
     verbose: bool = True,
 ) -> RandomSearchResult:
+    """
+    Esegue una ricerca casuale con cross-validation sui parametri del modello.
+    """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0")
     if not fold_loaders:

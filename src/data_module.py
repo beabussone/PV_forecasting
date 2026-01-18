@@ -6,18 +6,12 @@ from torch.utils.data import Dataset, DataLoader
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
-
-# ============================================================
-# Config & Dataset
-# ============================================================
-
 @dataclass
 class PVDataConfig:
     """
     Configurazione base per il dataset PV.
     - history_hours: numero di ore di storia in input (finestra passata)
     - horizon_hours: numero di ore future da prevedere (multi-step)
-    - include_future_covariates: se True, restituisce anche X_future
       (le covariate future sullo stesso orizzonte della label)
     - stride: passo della sliding window (default 1)
     - include_past_target: se True, concatena la y passata (kwp)
@@ -25,15 +19,21 @@ class PVDataConfig:
     """
     history_hours: int = 72
     horizon_hours: int = 24
-    include_future_covariates: bool = False
     stride: int = 1
     include_past_target: bool = True
-
 
 class PVForecastDataset(Dataset):
     """
     Genera finestre storiche (history) e target multistep (horizon) da serie orarie.
     Opzionalmente restituisce covariate future se disponibili nel train.
+    Args:
+    - X: DataFrame delle feature (covariate)
+    - y: DataFrame della label (kwp)
+    - config: configurazione del dataset (history, horizon, ecc.)
+    - min_start_idx: indice minimo di partenza per le finestre (default 0)
+    Restituisce dizionario con:
+    - x_hist: tensor (history, num_features) delle feature storiche
+    - y_future: tensor (horizon,) della label futura da prevedere
 
     PATCH: opzionalmente concatena la y passata (kwp fino a t) dentro x_hist
            per fare forecasting autoregressivo senza leakage.
@@ -60,7 +60,6 @@ class PVForecastDataset(Dataset):
         self.history = config.history_hours
         self.horizon = config.horizon_hours
         self.stride = config.stride
-        self.include_future_covariates = config.include_future_covariates
 
         # 🔽 nuovo flag (non rompe nulla: se non esiste nel config → False)
         self.include_past_target = bool(getattr(config, "include_past_target", False))
@@ -114,16 +113,7 @@ class PVForecastDataset(Dataset):
             "y_future": torch.from_numpy(y_future),
         }
 
-        if self.include_future_covariates:
-            x_future = self.X_values[h_end:f_end]
-            sample["x_future"] = torch.from_numpy(x_future)
-
         return sample
-
-
-# ============================================================
-# Split: solo Train / Val temporale
-# ============================================================
 
 def temporal_train_val_split(
     X: pd.DataFrame,
@@ -134,6 +124,12 @@ def temporal_train_val_split(
     """
     Split cronologico coerente (niente shuffle) tra train e val.
     Le serie devono avere stesso indice e lunghezza.
+    Args:
+    - X: DataFrame delle feature
+    - y: DataFrame della label
+    - train_ratio: frazione di dati per il train (default 0.8)
+    - val_ratio: frazione di dati per la val (default 0.2)
+    Restituisce: X_train, X_val, y_train, y_val
 
     train_ratio + val_ratio deve essere ~1.0.
     """
@@ -160,11 +156,6 @@ def temporal_train_val_split(
 
     return X_train, X_val, y_train, y_val
 
-
-# ============================================================
-# Split: Cross-Validation temporale (solo train/val)
-# ============================================================
-
 def temporal_cv_splits_train_val(
     X: pd.DataFrame,
     y: pd.DataFrame,
@@ -175,6 +166,11 @@ def temporal_cv_splits_train_val(
     Genera split di Cross-Validation per serie temporali senza test finale.
     - train = finestra che cresce progressivamente
     - val   = blocco subito successivo al train (dimensione fissa)
+    Args:
+    - X: DataFrame delle feature
+    - y: DataFrame della label
+    - n_splits: numero di split CV da generare (default 5)
+    - val_size: dimensione fissa del blocco di validazione (default None, calcolata automaticamente)
 
     Restituisce lista di tuple (X_train, X_val, y_train, y_val).
     """
@@ -224,15 +220,30 @@ def make_val_with_context(
     y_val: pd.DataFrame,
     history: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+    '''
+    Aggiunge contesto storico alla validazione.
+    Per ogni punto di validazione, aggiunge le ultime `history` righe
+    dal training set per permettere la creazione delle finestre storiche.
+    Args:
+    - X_train: DataFrame delle feature di training
+    - y_train: DataFrame della label di training
+    - X_val: DataFrame delle feature di validazione
+    - y_val: DataFrame della label di validazione
+    - history: numero di righe di contesto da aggiungere (history_hours)
+    Restituisce:
+    - X_ctx: DataFrame delle feature di validazione con contesto
+    - y_ctx: DataFrame della label di validazione con contesto
+    - history: numero di righe di contesto aggiunte
+    '''
     X_ctx = pd.concat([X_train.tail(history), X_val], axis=0)
     y_ctx = pd.concat([y_train.tail(history), y_val], axis=0)
     return X_ctx, y_ctx, history  # min_start_idx
 
-# ============================================================
-# DataLoader helper
-# ============================================================
-
 def _seed_worker(worker_id: int) -> None:
+    '''
+    Inizializza il seed per ogni worker del DataLoader per garantire
+    la riproducibilità quando si usa un seed globale.
+    '''
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)

@@ -1,17 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
-
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-
-
-# ============================================================
-# Batch helpers
-# ============================================================
 
 def _get_xy_from_batch(batch: Any) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -29,11 +22,6 @@ def _get_xy_from_batch(batch: Any) -> Tuple[torch.Tensor, torch.Tensor]:
         raise ValueError("Batch non riconosciuto: atteso dict o tuple(len=2).")
 
     return x.float(), y.float()
-
-
-# ============================================================
-# Metriche
-# ============================================================
 
 @torch.no_grad()
 def compute_rmse(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
@@ -82,11 +70,6 @@ def compute_naive_scale_from_series(
 
     return torch.mean(torch.abs(y[m:] - y[:-m])).item()
 
-
-# ============================================================
-# Core loops
-# ============================================================
-
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -94,6 +77,10 @@ def train_one_epoch(
     device: torch.device,
     loss_fn: nn.Module,
 ) -> float:
+    """
+    Esegue un'epoca di training sul DataLoader.
+    Ritorna la loss media pesata per numero di sample.
+    """
     model.train()
     running_loss = 0.0
     n_samples = 0
@@ -114,7 +101,6 @@ def train_one_epoch(
         n_samples += bs
 
     return running_loss / max(n_samples, 1)
-
 
 @torch.no_grad()
 def evaluate_metrics(
@@ -154,11 +140,6 @@ def evaluate_metrics(
         mae = sum_abs / max(n_elems, 1)
         out["mase"] = float(mae / naive_scale) if naive_scale > 0 else float("inf")
     return out
-
-
-# ============================================================
-# Fit wrapper (best model su val)
-# ============================================================
 
 @dataclass
 class FitResult:
