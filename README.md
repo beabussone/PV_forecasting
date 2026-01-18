@@ -1,214 +1,214 @@
-# Previsione della produzione di energia fotovoltaica
+# Forecasting photovoltaic energy production
 
-Modello end-to-end per prevedere la potenza di un impianto PV a partire da dati meteo (temperatura, umidità, vento, pioggia, nuvolosità) e radiazione solare (Dhi, Dni, Ghi). La pipeline pulisce i dati, li riallinea in un fuso fisso, applica encoding ciclico e feature fisiche, quindi prepara gli split temporali e i DataLoader PyTorch.
+End-to-end model to predict the power of a PV plant starting from weather data (temperature, humidity, wind, rain, cloudiness) and solar radiation (Dhi, Dni, Ghi). The pipeline cleans the data, realigns them to a fixed timezone, applies cyclic encoding and physical features, then prepares the temporal splits and PyTorch DataLoaders.
 
-**Obiettivi del progetto:**
-- Legare variabili meteorologiche e radiazione solare alla produzione PV.
-- Pulire dati (missing, outlier, categorie rare) in modo deterministico.
-- Sviluppare e confrontare modelli di previsione su split temporali robusti.
-- Fornire feature fisiche interpretabili riutilizzabili in altri modelli.
+**Project goals:**
+- Link meteorological variables and solar radiation to PV production.
+- Clean data (missing, outliers, rare categories) deterministically.
+- Develop and compare forecasting models on robust temporal splits.
+- Provide interpretable physical features reusable in other models.
 
-## Struttura dei file
-- `main.py`: entrypoint della pipeline; orchestra caricamento, EDA, preprocessing, split temporali, OHE, feature engineering, scaling, standardizzazione della `y`, DataLoader e training modello Seq2Seq LSTM (encoder–decoder).
-- `src/config.py`: tutte le configurazioni (percorsi dati, split, `PVDataConfig`, batch/num_workers, scaler mode, hyperparam modello, training params, path plot loss).
-- `src/data_upload.py`: lettura dei file Excel grezzi (`data/wx_dataset.xlsx`, `data/pv_dataset.xlsx`) con gestione dei fogli e check sull'engine `openpyxl`.
-- `src/EDA.py`: stampe di controllo e generazione dei plot EDA (`eda_plots/*.png` e `numeric_stats.csv`).
-- `src/preprocessing.py`: imputazione `rain_1h`, estrazione/rimozione di lat/lon, fix timezone (UTC+10), encoding ciclico ora/mese, allineamento X-y, OHE con vocabolario fisso e scaler standard/minmax fittati sul solo train.
-- `src/feature_engineering.py`: feature fisiche (angoli solari, clearness index, effective irradiance, cloud_effect, minuti da/alba/tramonto) e salvataggio delle matrici con feature.
-- `src/data_module.py`: split temporali (holdout o CV), dataset a finestre per serie storiche (`history_hours`/`horizon_hours`), aggiunta del contesto al validation e DataLoader PyTorch; supporta anche l'inclusione della y passata tra le feature del modello.
-- `requirements.txt`: dipendenze minime per eseguire pipeline, plot e PyTorch.
-- `data/processed/*.csv`: output intermedi; il main salva sempre `X_processed.csv` e `y_processed.csv`, mentre altri file (es. `X_*_feat.csv`) possono essere presenti da esecuzioni precedenti o pipeline separate e non sono necessariamente rigenerati.
-- `eda_plots/*.png`, `eda_plots/numeric_stats.csv`: grafici e statistiche descrittive prodotte dall'EDA.
+## File structure
+- `main.py`: pipeline entrypoint; orchestrates loading, EDA, preprocessing, temporal splits, OHE, feature engineering, scaling, standardization of `y`, DataLoader and Seq2Seq LSTM (encoder–decoder) model training.
+- `src/config.py`: all configurations (data paths, splits, `PVDataConfig`, batch/num_workers, scaler mode, model hyperparameters, training params, loss plot path).
+- `src/data_upload.py`: reading raw Excel files (`data/wx_dataset.xlsx`, `data/pv_dataset.xlsx`) with sheet handling and checks on the `openpyxl` engine.
+- `src/EDA.py`: control prints and generation of EDA plots (`eda_plots/*.png` and `numeric_stats.csv`).
+- `src/preprocessing.py`: imputation `rain_1h`, extraction/removal of lat/lon, timezone fix (UTC+10), cyclic encoding hour/month, X-y alignment, OHE with fixed vocabulary and standard/minmax scaler fit on train only.
+- `src/feature_engineering.py`: physical features (solar angles, clearness index, effective irradiance, cloud_effect, minutes since/until sunrise/sunset) and saving of matrices with features.
+- `src/data_module.py`: temporal splits (holdout or CV), windowed datasets for time series (`history_hours`/`horizon_hours`), adding context to validation and PyTorch DataLoader; also supports inclusion of past y among model features.
+- `requirements.txt`: minimum dependencies to run pipeline, plots and PyTorch.
+- `data/processed/*.csv`: intermediate outputs; the main always saves `X_processed.csv` and `y_processed.csv`, while other files (e.g. `X_*_feat.csv`) may be present from previous runs or separate pipelines and are not necessarily regenerated.
+- `eda_plots/*.png`, `eda_plots/numeric_stats.csv`: charts and descriptive statistics produced by the EDA.
 
-## Come gira la pipeline (main.py)
-1. Carica X grezze meteo e y PV (`load_datasets`), estrae lat/lon.
-2. Esegue EDA base e salva i plot in `eda_plots/`.
-3. Preprocessing deterministico (`preprocess_pipeline`): imputazioni, timezone fisso, encoding ciclico, allineamento, cast a `float32`.
-4. Split temporale coerente (holdout o CV) senza leakage.
-5. Fit OHE solo su train e applicazione a val/test.
-6. Feature engineering fisico (angoli solari, effective irradiance, cloud effect, timing solare) e scaling opzionale.
-7. Standardizza la `y` (mean/std calcolati sul solo train di ogni fold) per stabilizzare il training.
-8. Per il validation aggiunge un contesto storico (ultime `history_hours` del train) così le finestre non partono "a vuoto".
-9. Salva sempre `data/processed/X_processed.csv` e `data/processed/y_processed.csv`; i file `data/processed/X_*_feat.csv` possono derivare da esecuzioni precedenti o pipeline di preprocessing separate e non sono sempre rigenerati dal main attuale. Costruisce i DataLoader per il training PyTorch includendo, se configurato, la `y` passata dentro `x_hist`.
-10. Allena un modello Seq2Seq LSTM (encoder–decoder) multi-step (horizon configurabile) con MSE e log delle loss train/val; il path `training.loss_plot_path` esiste nel config ma non è ancora utilizzato nella pipeline attuale per salvare il grafico.
+## How the pipeline runs (main.py)
+1. Loads raw weather X and PV y (`load_datasets`), extracts lat/lon.
+2. Runs base EDA and saves plots in `eda_plots/`.
+3. Deterministic preprocessing (`preprocess_pipeline`): imputations, fixed timezone, cyclic encoding, alignment, cast to `float32`.
+4. Coherent temporal split (holdout or CV) without leakage.
+5. Fit OHE only on train and apply to val/test.
+6. Physical feature engineering (solar angles, effective irradiance, cloud effect, solar timing) and optional scaling.
+7. Standardizes `y` (mean/std computed on train only of each fold) to stabilize training.
+8. For validation adds a historical context (last `history_hours` of train) so windows do not start "empty".
+9. Always saves `data/processed/X_processed.csv` and `data/processed/y_processed.csv`; the files `data/processed/X_*_feat.csv` can derive from previous runs or separate preprocessing pipelines and are not always regenerated by the current main. Builds PyTorch DataLoaders for training including, if configured, past `y` inside `x_hist`.
+10. Trains a Seq2Seq LSTM (encoder–decoder) multi-step model (configurable horizon) with MSE and train/val loss log; the path `training.loss_plot_path` exists in the config but is not yet used in the current pipeline to save the plot.
 
-## Analisi Esplorativa dei Dati (EDA)
-L’EDA controlla qualità e distribuzioni delle variabili meteo e della label PV usando statistiche descrittive, istogrammi, heatmap di correlazione e boxplot per categorie. I grafici sono salvati in `eda_plots/` e riepilogati qui sotto.
+## Exploratory Data Analysis (EDA)
+EDA checks quality and distributions of weather variables and the PV label using descriptive statistics, histograms, correlation heatmaps and boxplots by category. The plots are saved in `eda_plots/` and summarized below.
 
-### Risultati sintetici EDA
-- Missing: solo `rain_1h` ha vuoti rilevanti (~79%); le etichette PV non hanno missing → imputazione a 0.
-- Correlazioni con `kwp`: `Ghi` domina (≈0.95), seguono `Dni` (≈0.79) e `Dhi` (≈0.66); umidità/temperatura intorno a 0.43.
-- Categorie meteo: poche classi principali (`sky is clear`, `light rain`, `overcast clouds`) e molte rare → OHE con bucket `other`.
-- Analisi temporale: picchi PV nelle ore centrali, coerenti con il fuso fisso e con i picchi di irraggiamento.
+### EDA summary results
+- Missing: only `rain_1h` has significant gaps (~79%); PV labels have no missing → imputation to 0.
+- Correlations with `kwp`: `Ghi` dominates (≈0.95), followed by `Dni` (≈0.79) and `Dhi` (≈0.66); humidity/temperature around 0.43.
+- Weather categories: few main classes (`sky is clear`, `light rain`, `overcast clouds`) and many rare → OHE with `other` bucket.
+- Temporal analysis: PV peaks in central hours, coherent with fixed timezone and irradiation peaks.
 
-### Galleria EDA (estratto)
-- ![Serie storica della potenza](eda_plots/time_series_kwp.png) Andamento temporale stabile, conferma il riallineamento in UTC+10.
-- ![Correlazioni numeriche](eda_plots/correlation_numeric.png) Le componenti radiative spiccano; pressione e umidità sono secondarie.
-- ![Distribuzione Ghi](eda_plots/hist_Ghi.png) Coda destra pronunciata → utile il clipping outlier.
-- ![Distribuzione Dni](eda_plots/hist_Dni.png) Varianza alta della componente diretta, motivazione per combinare con lo zenith.
-- ![Distribuzione Dhi](eda_plots/hist_Dhi.png) Valori compatti per la quota diffusa, base per `direct_fraction`.
-- ![Vento (m/s)](eda_plots/hist_wind_speed.png) Distribuzione stretta intorno a valori moderati; impatto limitato ma stabile sul modello.
-- ![Direzione del vento](eda_plots/hist_wind_deg.png) Pattern quasi uniforme → conviene lasciarla come variabile continua.
-- ![Pressione](eda_plots/hist_pressure.png) Distribuzione stretta, buon candidato per scaling standard.
-- ![Dew point](eda_plots/hist_dew_point.png) Trend quasi gaussiano che segue l’umidità, utile per capire condizioni di condensa.
-- ![Pioggia 1h](eda_plots/hist_rain_1h.png) Dominata dagli zeri; l’imputazione a 0 non introduce rumore.
-- ![Nuvolosità](eda_plots/hist_clouds_all.png) Distribuzione quasi uniforme → `cloud_effect` come attenuazione continua.
-- ![Classi meteo - bar](eda_plots/bar_weather_description.png) e ![Classi meteo - pie](eda_plots/pie_weather_description.png) Poche classi prevalenti, molte rare: giustifica il bucket `other`.
+### EDA gallery (excerpt)
+- ![Power time series](eda_plots/time_series_kwp.png) Stable temporal trend, confirms realignment to UTC+10.
+- ![Numeric correlations](eda_plots/correlation_numeric.png) Radiative components stand out; pressure and humidity are secondary.
+- ![Ghi distribution](eda_plots/hist_Ghi.png) Pronounced right tail → outlier clipping useful.
+- ![Dni distribution](eda_plots/hist_Dni.png) High variance of the direct component, motivation to combine with zenith.
+- ![Dhi distribution](eda_plots/hist_Dhi.png) Compact values for the diffuse component, basis for `direct_fraction`.
+- ![Wind (m/s)](eda_plots/hist_wind_speed.png) Tight distribution around moderate values; limited but stable impact on the model.
+- ![Wind direction](eda_plots/hist_wind_deg.png) Almost uniform pattern → better keep it as a continuous variable.
+- ![Pressure](eda_plots/hist_pressure.png) Tight distribution, good candidate for standard scaling.
+- ![Dew point](eda_plots/hist_dew_point.png) Nearly Gaussian trend that follows humidity, useful to understand condensation conditions.
+- ![Rain 1h](eda_plots/hist_rain_1h.png) Dominated by zeros; imputation to 0 does not introduce noise.
+- ![Cloudiness](eda_plots/hist_clouds_all.png) Almost uniform distribution → `cloud_effect` as continuous attenuation.
+- ![Weather classes - bar](eda_plots/bar_weather_description.png) and ![Weather classes - pie](eda_plots/pie_weather_description.png) Few prevalent classes, many rare: justifies the `other` bucket.
 
-### Analisi temporale avanzata (eda_plots/temporal)
-Questi grafici servono per capire struttura, stagionalità e dipendenze della serie PV, e quindi guidare la scelta del modello e della finestra storica.
+### Advanced temporal analysis (eda_plots/temporal)
+These plots help understand structure, seasonality and dependencies of the PV series, and thus guide model choice and historical window.
 
-- ![Profilo giornaliero](eda_plots/temporal/daily_profile_kwp.png) Media oraria della produzione: curva a campana con minimi notturni e picco nelle ore centrali. La pendenza di salita/discesa indica l'asimmetria mattino/pomeriggio e conferma che il segnale e dominato dal ciclo diurno → suggerisce modelli che catturano pattern intraday e finestre storiche che coprano un intero giorno.
-- ![Decomposizione stagionale](eda_plots/temporal/seasonal_decomp_kwp.png) Scomposizione in trend, stagionale e residuo: il trend mostra variazioni lente (stagioni o degradazione), la componente stagionale evidenzia oscillazioni regolari, il residuo mostra rumore e eventi improvvisi (nubi) → motiva feature di calendario/cicliche e modelli capaci di separare trend da stagionalità.
-- ![ACF/PACF](eda_plots/temporal/acf_pacf_kwp.png) L'ACF evidenzia memoria a lag brevi e risonanze a 24h/48h; la PACF mostra i lag realmente informativi una volta tolta la dipendenza indiretta → aiuta a scegliere `history_hours`, il numero di lags utili e supporta modelli sequence-based LSTM/Seq2Seq.
-- ![Spettro di potenza](eda_plots/temporal/power_spectrum_kwp.png) L'energia è concentrata su frequenze giornaliere (e secondariamente settimanali), con armoniche che descrivono la forma non sinusoidale del profilo PV → conferma periodicità, giustifica encoding ciclico e modelli con capacità di catturare componenti periodiche multiple.
+- ![Daily profile](eda_plots/temporal/daily_profile_kwp.png) Hourly average production: bell-shaped curve with night minima and peak in central hours. The rise/decline slope indicates morning/afternoon asymmetry and confirms that the signal is dominated by the diurnal cycle → suggests models that capture intraday patterns and historical windows that cover a full day.
+- ![Seasonal decomposition](eda_plots/temporal/seasonal_decomp_kwp.png) Decomposition into trend, seasonal and residual: trend shows slow variations (seasons or degradation), seasonal component highlights regular oscillations, residual shows noise and sudden events (clouds) → motivates calendar/cyclic features and models capable of separating trend from seasonality.
+- ![ACF/PACF](eda_plots/temporal/acf_pacf_kwp.png) ACF highlights memory at short lags and resonances at 24h/48h; PACF shows the lags that are truly informative once indirect dependence is removed → helps choose `history_hours`, the number of useful lags and supports sequence-based LSTM/Seq2Seq models.
+- ![Power spectrum](eda_plots/temporal/power_spectrum_kwp.png) Energy is concentrated on daily (and secondarily weekly) frequencies, with harmonics that describe the non-sinusoidal shape of the PV profile → confirms periodicity, justifies cyclic encoding and models capable of capturing multiple periodic components.
 
-In sintesi: la forte periodicità e l'autocorrelazione suggeriscono modelli temporali con memoria (LSTM/Seq2Seq) e una finestra storica che copra almeno il ciclo giornaliero; la stagionalità più lenta giustifica feature di calendario e split temporali rigorosi per evitare leakage.
+In summary: strong periodicity and autocorrelation suggest temporal models with memory (LSTM/Seq2Seq) and a historical window that covers at least the daily cycle; slower seasonality justifies calendar features and rigorous temporal splits to avoid leakage.
 
-# Ciclical Encoding
-Per rendere il tempo digeribile dal modello:
-- **Rimozione dell'Ora Legale (DST)**: conversione di tutti i timestamp in fuso fisso UTC+10 e arrotondamento all’ora → niente salti artificiali tra 12:00 e 13:00.
-- **Encoding ciclico (sin/cos)**: ora (0-23) e mese (1-12) trasformati su cerchio per preservare la continuità (23 è vicino a 0).
+# Cyclical Encoding
+To make time digestible for the model:
+- **Removal of Daylight Saving Time (DST)**: conversion of all timestamps to fixed timezone UTC+10 and rounding to the hour → no artificial jumps between 12:00 and 13:00.
+- **Cyclical encoding (sin/cos)**: hour (0-23) and month (1-12) transformed on a circle to preserve continuity (23 is close to 0).
 
 ## Feature engineering
-Feature fisiche aggiunte per migliorare le prestazioni senza usare il tilt reale del pannello.
+Physical features added to improve performance without using the actual panel tilt.
 
 ### Solar features
-| Feature           | Descrizione |
+| Feature           | Description |
 | ----------------- | ----------- |
-| `solar_zenith`    | Angolo zenitale (90° = sole allo zenit), influenza la radiazione incidente. |
-| `solar_azimuth`   | Direzione del sole (0° Nord, 180° Sud), distingue mattino/pomeriggio. |
-| `clearness_index` | Rapporto tra GHI reale ed ETR (extraterrestrial irradiance), misura la limpidezza del cielo. |
+| `solar_zenith`    | Zenith angle (90° = sun at zenith), influences incident radiation. |
+| `solar_azimuth`   | Direction of the sun (0° North, 180° South), distinguishes morning/afternoon. |
+| `clearness_index` | Ratio between real GHI and ETR (extraterrestrial irradiance), measures sky clarity. |
 
 ### Effective irradiance
-| Feature                | Formula                   | Significato |
-| ---------------------- | ------------------------- | ----------- |
-| `effective_irradiance` | `DNI * cos(zenith) + DHI` | Stima dell’energia effettivamente utile al pannello. |
-| `direct_fraction`      | `DNI / (DNI + DHI)`       | Indica se prevale radiazione diretta o diffusa. |
-| `clear_sky_index`      | `GHI / GHI_clear`         | Quanto la condizione reale differisce dal cielo ideale. |
+| Feature                | Formula                   | Meaning |
+| ---------------------- | ------------------------- | ------- |
+| `effective_irradiance` | `DNI * cos(zenith) + DHI` | Estimate of the energy effectively useful to the panel. |
+| `direct_fraction`      | `DNI / (DNI + DHI)`       | Indicates whether direct or diffuse radiation prevails. |
+| `clear_sky_index`      | `GHI / GHI_clear`         | How much the real condition differs from the ideal sky. |
 
 ### Atmospheric & temporal features
-| Feature                  | Formula / Definizione | Significato |
-| ------------------------ | --------------------- | ------------ |
-| `cloud_effect`           | `GHI * (1 - clouds_all/100)` | Radiazione attesa dopo l’attenuazione delle nubi (proxy dello shading atmosferico). |
-| `minutes_since_sunrise`  | differenza tra ora attuale e alba stimata | Indica l’avanzamento della giornata solare. |
-| `minutes_until_sunset`   | differenza tra tramonto stimato e ora attuale | Quanta parte della giornata solare rimane. |
+| Feature                  | Formula / Definition | Meaning |
+| ------------------------ | -------------------- | -------- |
+| `cloud_effect`           | `GHI * (1 - clouds_all/100)` | Expected radiation after cloud attenuation (proxy of atmospheric shading). |
+| `minutes_since_sunrise`  | difference between current time and estimated sunrise | Indicates the progress of the solar day. |
+| `minutes_until_sunset`   | difference between estimated sunset and current time | How much of the solar day remains. |
 
-### Osservazioni
-- Le feature sono combinazioni non lineari di variabili fisiche → aggiungono informazione, non rumore.
-- `effective_irradiance`, `direct_fraction` e `clear_sky_index` descrivono lo stato radiativo senza tilt.
-- `cloud_effect` ingloba la copertura nuvolosa come attenuazione continua.
-- `minutes_since_sunrise` e `minutes_until_sunset` modellano la fase del giorno, tra le feature più predittive per la curva PV.
+### Notes
+- The features are nonlinear combinations of physical variables → they add information, not noise.
+- `effective_irradiance`, `direct_fraction` and `clear_sky_index` describe the radiative state without tilt.
+- `cloud_effect` incorporates cloud cover as continuous attenuation.
+- `minutes_since_sunrise` and `minutes_until_sunset` model the phase of the day, among the most predictive features for the PV curve.
 
-## Output del preprocessing
-- Dataset con feature: `data/processed/X_feat.csv` (o `X_*_feat.csv` per train/val/test). Nel main attuale non vengono generati direttamente: i file `X_*_feat.csv` presenti in `data/processed/` derivano da esecuzioni precedenti o da funzioni di preprocessing invocate separatamente.
+## Preprocessing output
+- Dataset with features: `data/processed/X_feat.csv` (or `X_*_feat.csv` for train/val/test). In the current main they are not generated directly: the `X_*_feat.csv` files present in `data/processed/` derive from previous runs or from preprocessing functions invoked separately.
 - Target: `data/processed/y_processed.csv`.
 
-## Note su data_module (modifiche recenti)
-- **Context nel validation**: quando si costruiscono i set di val, si premettono le ultime `history_hours` del train a `X_val` e `y_val` (funzione `make_val_with_context`). Questo evita finestre iniziali senza storia e rende la validazione coerente con la dinamica autoregressiva.
+## Notes on data_module (recent changes)
+- **Context in validation**: when building the val sets, the last `history_hours` of train are prepended to `X_val` and `y_val` (function `make_val_with_context`). This avoids initial windows without history and makes validation consistent with autoregressive dynamics.
 
-## Configurazione (config.py)
-- `split.mode`: seleziona lo schema di training (`train_val`, `train_all`, `cv`).  
-  - `train_val`: split temporale semplice con holdout finale.  
-  - `train_all`: usa tutto il train, con un piccolo blocco finale opzionale come validation.  
-  - `cv`: cross-validation temporale con più fold, senza shuffle.
-- `train_all_val_ratio`: usato solo in `train_all` per determinare la porzione finale riservata alla validazione mantenendo l’ordine temporale.
-- `history_hours`, `horizon_hours`: definiscono rispettivamente la lunghezza della finestra storica in input e l’orizzonte di previsione multi-step (es. 72 ore di input → 24 ore di output).
-- `include_past_target`: se `True`, la `y` passata (kwp) viene concatenata alle feature in `x_hist`, abilitando un forecasting autoregressivo senza leakage futuro.
-- `dataloader.scaling_mode`: controlla lo scaling (`standard`, `minmax`, o `None`) fittato solo sul train e riapplicato a val/test tramite lo `scaler.pkl`.
-- `random_search.enabled`: abilita/disabilita la random search su CV per l’ottimizzazione degli iperparametri, con metriche selezionabili (loss/rmse/mase).
+## Configuration (config.py)
+- `split.mode`: selects the training scheme (`train_val`, `train_all`, `cv`).  
+  - `train_val`: simple temporal split with final holdout.  
+  - `train_all`: uses all train, with a small optional final block as validation.  
+  - `cv`: temporal cross-validation with multiple folds, no shuffle.
+- `train_all_val_ratio`: used only in `train_all` to determine the final portion reserved for validation while keeping temporal order.
+- `history_hours`, `horizon_hours`: define respectively the length of the historical input window and the multi-step forecasting horizon (e.g. 72 hours input → 24 hours output).
+- `include_past_target`: if `True`, past `y` (kwp) is concatenated to features in `x_hist`, enabling autoregressive forecasting without future leakage.
+- `dataloader.scaling_mode`: controls scaling (`standard`, `minmax`, or `None`) fit only on train and reapplied to val/test via `scaler.pkl`.
+- `random_search.enabled`: enables/disables random search on CV for hyperparameter optimization, with selectable metrics (loss/rmse/mase).
 
-## Valutazione e Test
-`evaluate.py` carica modello, scaler e vocabolario OHE salvati in `artifacts/`, ricostruisce preprocessing e feature engineering, e valuta il modello sul foglio test.  
-`cfg.test.sheet_name` indica quale sheet del dataset usare come test finale (es. un intervallo temporale non visto nel train).  
-Le metriche calcolate in scala reale sono MAE, MSE, RMSE e MASE (con stagione m=24), così da confrontare errore assoluto, quadratico e relativo a una baseline stagionale naive.  
-Durante la valutazione vengono generati uno o più grafici `eda_plots/pred_vs_naive_week_*.png` (fino a 4, in base alla lunghezza del periodo di test), che mostrano la predizione del modello contro la baseline naive su settimane campionate dal test.
+## Evaluation and Test
+`evaluate.py` loads model, scaler and saved OHE vocabulary in `artifacts/`, rebuilds preprocessing and feature engineering, and evaluates the model on the test sheet.  
+`cfg.test.sheet_name` indicates which sheet of the dataset to use as the final test (e.g. a time range not seen in train).  
+Metrics computed in real scale are MAE, MSE, RMSE and MASE (with season m=24), in order to compare absolute, squared and relative error to a naive seasonal baseline.  
+During evaluation one or more plots `eda_plots/pred_vs_naive_week_*.png` are generated (up to 4, based on the length of the test period), which show the model prediction against the naive baseline on sampled weeks from the test.
 
-## Dipendenze opzionali
-`statsmodels` è opzionale: serve solo per ACF, PACF e decomposizione temporale nell’EDA (`src/EDA.py`). Se non è installato, quei grafici vengono saltati.
+## Optional dependencies
+`statsmodels` is optional: it is only needed for ACF, PACF and temporal decomposition in the EDA (`src/EDA.py`). If it is not installed, those plots are skipped.
 
-## Modello implementato – Seq2Seq LSTM
-Schema del flusso:
+## Implemented model – Seq2Seq LSTM
+Flow diagram:
 ```
-x_hist -> encoder -> stato -> decoder autoregressivo -> y_hat[24]
+x_hist -> encoder -> state -> autoregressive decoder -> y_hat[24]
 ```
 
-`x_hist` contiene la finestra storica delle feature meteo + feature ingegnerizzate, con lunghezza `history_hours` (es. 72 ore).  
-Se `include_past_target=True`, la serie storica della `y` (kwp) viene concatenata a `x_hist` lungo l’asse delle feature, così il modello vede anche l’andamento passato della potenza senza usare informazioni future.
+`x_hist` contains the historical window of weather features + engineered features, with length `history_hours` (e.g. 72 hours).  
+If `include_past_target=True`, the historical series of `y` (kwp) is concatenated to `x_hist` along the feature axis, so the model also sees the past trend of power without using future information.
 
-L’encoder è un LSTM che legge l’intera sequenza `x_hist` e riassume la storia nello stato finale (h, c). Questo stato cattura pattern diurni, dinamiche meteo e trend a breve termine presenti nella finestra storica.  
-Il decoder è un LSTM autoregressivo: parte da un token iniziale trainabile, poi predice un passo alla volta. A ogni step:
-1) riceve come input la previsione del passo precedente,  
-2) aggiorna lo stato interno,  
-3) emette il valore successivo di `y_hat`.  
-Il risultato è un vettore `y_hat` di lunghezza `horizon_hours` (es. 24 ore future).
+The encoder is an LSTM that reads the entire `x_hist` sequence and summarizes the history in the final state (h, c). This state captures diurnal patterns, weather dynamics and short-term trends present in the historical window.  
+The decoder is an autoregressive LSTM: it starts from a trainable initial token, then predicts one step at a time. At each step:
+1) it receives as input the prediction of the previous step,  
+2) updates the internal state,  
+3) emits the next value of `y_hat`.  
+The result is a vector `y_hat` of length `horizon_hours` (e.g. 24 future hours).
 
-### Encoder e Decoder – Funzionamento dettagliato
+### Encoder and Decoder – Detailed operation
 **ENCODER**  
-L’encoder riceve in input `x_hist`, cioè la history di 72 ore con tutte le feature (meteo, radiazione e feature ingegnerizzate).  
-In `src/models.py`, l’LSTM dell’encoder scorre l’intera sequenza temporale e la comprime in due stati finali: stato nascosto `h` e stato di cella `c`.  
-Questi stati rappresentano un “riassunto dinamico” del passato: catturano pattern giornalieri, variazioni meteo e trend a breve termine.  
-`h` e `c` vengono poi passati direttamente al decoder come punto di partenza.
+The encoder receives as input `x_hist`, i.e. the 72-hour history with all features (weather, radiation and engineered features).  
+In `src/models.py`, the LSTM of the encoder runs through the entire time sequence and compresses it into two final states: hidden state `h` and cell state `c`.  
+These states represent a “dynamic summary” of the past: they capture daily patterns, weather variations and short-term trends.  
+`h` and `c` are then passed directly to the decoder as a starting point.
 
 **DECODER**  
-Il decoder parte dallo stato finale dell’encoder (`h`, `c`) e genera le 24 ore future in modo autoregressivo, coerente con `horizon=24`.  
-Ogni passo usa come input l’output del passo precedente: non c’è teacher forcing in test, ma una previsione step-by-step che riflette il comportamento reale in inferenza.  
-Questo rende il decoder sensibile all’accumulo di errori, ma consente di modellare la dipendenza temporale su tutto l’orizzonte.
+The decoder starts from the final state of the encoder (`h`, `c`) and generates the next 24 hours autoregressively, consistent with `horizon=24`.  
+Each step uses as input the output of the previous step: there is no teacher forcing in test, but a step-by-step prediction that reflects real inference behavior.  
+This makes the decoder sensitive to error accumulation, but allows modeling temporal dependence across the entire horizon.
 
-**FLUSSO COMPLETO**  
+**FULL FLOW**  
 ```
-x_hist -> Encoder -> (h, c) -> Decoder autoregressivo -> y_hat[24]
+x_hist -> Encoder -> (h, c) -> Autoregressive decoder -> y_hat[24]
 ```
-La sequenza passa interamente attraverso l’encoder; il decoder riceve lo stato finale e genera il primo valore futuro, poi usa quel valore per produrre il secondo, e cosi' via fino al 24esimo step.  
-Il risultato è una traiettoria completa delle 24 ore successive, costruita in modo consistente con la dinamica osservata nelle 72 ore precedenti.
+The sequence passes entirely through the encoder; the decoder receives the final state and generates the first future value, then uses that value to produce the second, and so on until the 24th step.  
+The result is a complete trajectory of the next 24 hours, built consistently with the dynamics observed in the previous 72 hours.
 
 **include_past_target**  
-Quando `include_past_target=True`, la kwp passata entra dentro `x_hist` come feature aggiuntiva, ma solo per il passato.  
-Non c’è leakage: l’informazione della `y` futura non viene mai fornita al modello, mentre la storia della potenza aiuta l’encoder a sintetizzare meglio il contesto.
+When `include_past_target=True`, the past kwp enters inside `x_hist` as an additional feature, but only for the past.  
+There is no leakage: the future `y` information is never provided to the model, while the power history helps the encoder synthesize context better.
 
-Con `history=72` e `horizon=24`, il modello usa 3 giorni di contesto per prevedere il giorno successivo.  
-Questo schema è coerente con la stagionalità giornaliera del PV e con le finestre autoregressive tipiche per la produzione oraria.
+With `history=72` and `horizon=24`, the model uses 3 days of context to forecast the next day.  
+This scheme is consistent with the daily seasonality of PV and with typical autoregressive windows for hourly production.
 
-Nel training si usa una loss MSE e un loop multi-epoca (default `epochs=20`).  
-È attivo l’early stopping (`early_stopping=True`, `patience=8`, `min_delta=0.0`) per fermare l’allenamento quando la metrica di validazione non migliora.  
-Le metriche monitorate includono MSE e RMSE, e quando disponibile anche MASE (con m=24).  
-La validazione usa `make_val_with_context`, che premette le ultime `history_hours` del train a `X_val` e `y_val`: questo evita finestre iniziali “senza storia” e garantisce che il decoder autoregressivo parta da un contesto realistico, riducendo distorsioni nelle metriche.
+In training an MSE loss and a multi-epoch loop are used (default `epochs=20`).  
+Early stopping is active (`early_stopping=True`, `patience=8`, `min_delta=0.0`) to stop training when the validation metric does not improve.  
+The monitored metrics include MSE and RMSE, and when available also MASE (with m=24).  
+Validation uses `make_val_with_context`, which prepends the last `history_hours` of train to `X_val` and `y_val`: this avoids initial windows “without history” and ensures that the autoregressive decoder starts from a realistic context, reducing distortions in the metrics.
 
-## Risultati e Output
-Gli output vengono salvati in:
-- `eda_plots/`: grafici EDA base, inclusi `pred_vs_naive_week*.png` che confrontano le predizioni del modello con una baseline naive su finestre settimanali.
-- `eda_plots/temporal/`: grafici temporali (ACF, decomposizione stagionale, profilo giornaliero) utili per leggere periodicità, autocorrelazioni e pattern diurno della produzione.
-- `artifacts/`: contiene i file necessari alla valutazione e al riuso del modello.
-  - `model_seq2seq.pth`: pesi del modello Seq2Seq LSTM.
-  - `scaler.pkl`: statistiche di scaling di X e y (fittate sul train).
-  - `ohe_vocab.pkl`: vocabolario delle colonne OHE per `weather_description`.
-  - `X_val_scaled.npy`, `y_val_scaled.npy`: validation set scalati (per valutazione offline).
-- `data/processed/`: dataset preprocessati e/o feature-engineered (X/y allineate, feature derivate, target scalati).
+## Results and Output
+Outputs are saved in:
+- `eda_plots/`: base EDA charts, including `pred_vs_naive_week*.png` that compare model predictions with a naive baseline on weekly windows.
+- `eda_plots/temporal/`: temporal charts (ACF, seasonal decomposition, daily profile) useful to read periodicity, autocorrelations and diurnal patterns of production.
+- `artifacts/`: contains the files needed for evaluation and model reuse.
+  - `model_seq2seq.pth`: Seq2Seq LSTM model weights.
+  - `scaler.pkl`: scaling statistics for X and y (fit on train).
+  - `ohe_vocab.pkl`: vocabulary of OHE columns for `weather_description`.
+  - `X_val_scaled.npy`, `y_val_scaled.npy`: scaled validation set (for offline evaluation).
+- `data/processed/`: preprocessed and/or feature-engineered datasets (aligned X/y, derived features, scaled targets).
 
-Metriche in scala reale (test):
+Metrics in real scale (test):
 - MAE  (real): 3.6479
 - MSE  (real): 50.9145
 - RMSE (real): 7.1354
 - MASE (m=24): 0.7638
 
-Interpretazione sintetica:
-- MAE e RMSE quantificano l’errore medio e la penalizzazione degli errori grandi in kW/kWp.
-- MASE < 1 indica che il modello supera la baseline naive stagionale (m=24).
+Brief interpretation:
+- MAE and RMSE quantify the average error and penalization of large errors in kW/kWp.
+- MASE < 1 indicates that the model outperforms the naive seasonal baseline (m=24).
 
-### Forecast vs Naive (settimane campionate)
-Durante la valutazione `evaluate.py` genera da 1 a N grafici `eda_plots/pred_vs_naive_week_*.png`, a seconda della lunghezza del periodo di test. Di seguito ne vengono mostrati fino a 4, quando disponibili.
+### Forecast vs Naive (sampled weeks)
+During evaluation `evaluate.py` generates from 1 to N charts `eda_plots/pred_vs_naive_week_*.png`, depending on the length of the test period. Up to 4 are shown below, when available.
 
 - ![Forecast vs naive – Week 1](eda_plots/pred_vs_naive_week_1.png)
-  Confronta la curva prevista con la baseline naive (t-24) su una settimana di test. Si osserva se il modello segue i picchi diurni e gli azzeramenti notturni meglio del naive; scarti sistematici sui picchi indicano under/over-estimation della produzione nelle ore centrali.
+  Compares the predicted curve with the naive baseline (t-24) on a test week. It is observed whether the model follows the diurnal peaks and nighttime zeros better than the naive; systematic deviations on peaks indicate under/over-estimation of production in central hours.
 
 - ![Forecast vs naive – Week 2](eda_plots/pred_vs_naive_week_2.png)
-  Mostra la capacità del modello di adattarsi a variazioni giorno-per-giorno rispetto al naive. Quando la curva del modello è più vicina alla ground truth nelle transizioni alba/tramonto, l’errore assoluto tende a ridursi e contribuisce a MAE/RMSE più bassi.
+  Shows the model's ability to adapt to day-to-day variations compared to the naive. When the model curve is closer to ground truth at sunrise/sunset transitions, absolute error tends to decrease and contributes to lower MAE/RMSE.
 
 - ![Forecast vs naive – Week 3](eda_plots/pred_vs_naive_week_3.png)
-  Evidenzia eventuali errori tipici: ritardi sui picchi, smoothing eccessivo o sovrastima in condizioni nuvolose. Se il modello corregge la baseline nei giorni con profilo attenuato, migliora anche il MASE rispetto al naive.
+  Highlights possible typical errors: delays on peaks, excessive smoothing or overestimation in cloudy conditions. If the model corrects the baseline on days with attenuated profile, it also improves MASE versus naive.
 
 - ![Forecast vs naive – Week 4](eda_plots/pred_vs_naive_week_4.png)
-  Permette di valutare la robustezza su una finestra diversa: se il modello segue bene sia i picchi sia gli zero notturni, la distanza media dalla ground truth diminuisce e si riflette nelle metriche aggregate.
+  Allows evaluating robustness on a different window: if the model follows both peaks and nighttime zeros well, the average distance from ground truth decreases and is reflected in aggregate metrics.
 
-Il legame con le metriche: quando le curve del modello seguono meglio i picchi e le valli rispetto al naive, si riflette in MAE/RMSE più bassi e in un MASE < 1.  
-I grafici temporali in `eda_plots/temporal/` aiutano a leggere la stagionalità giornaliera e le autocorrelazioni che il modello sfrutta per ottenere le metriche sopra.
+The link with the metrics: when the model curves follow peaks and valleys better than the naive, it is reflected in lower MAE/RMSE and a MASE < 1.  
+The temporal charts in `eda_plots/temporal/` help read the daily seasonality and autocorrelations that the model exploits to obtain the metrics above.
